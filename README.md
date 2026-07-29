@@ -14,54 +14,54 @@ Whisper's built-in `translate` task converts speech to English on your machine. 
 
 - Windows 10/11
 - Python 3.10+ (3.11 recommended)
-- A working playback device (speakers/headphones) — the app captures **system audio loopback**
-- Optional but strongly recommended: an NVIDIA GPU with CUDA for near-real-time speed
+- Speakers or headphones (captures **system audio loopback**)
+- Optional but recommended: NVIDIA GPU with CUDA for near-real-time speed
 
-### Install
+---
+
+### 1. Install
 
 ```bat
 git clone https://github.com/SHAD0WSLA3YR/subtitle-translator.git
-cd translate
+cd subtitle-translator
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-If you have an NVIDIA GPU, install a CUDA-enabled PyTorch build from https://pytorch.org that matches your driver, then reinstall `faster-whisper` if needed.
+If you have an NVIDIA GPU, install a CUDA-enabled PyTorch from [pytorch.org](https://pytorch.org) that matches your driver, then reinstall `faster-whisper`.
 
-### Run
+---
+
+### 2. Run
 
 ```bat
 run.bat
 ```
 
-Or:
+> First launch downloads the Whisper model (~500 MB for `small`). Cached after that.
 
-```bat
-python run.py
-```
+**Useful flags:**
 
-Useful flags:
+| Flag | What it does |
+|---|---|
+| `python run.py --srt out.srt` | Also write an SRT file while watching |
+| `python run.py --compare` | Log heard Japanese beside English (~2x slower) |
+| `python run.py -v` | Verbose logs |
+| `python run.py -c my.yaml` | Custom config path |
 
-```bat
-python run.py --srt my_video.srt     # also write an SRT file while watching
-python run.py --compare              # log heard Japanese beside the English (~2x slower)
-python run.py -v                     # verbose logs
-python run.py -c config.yaml         # custom config path
-```
+---
 
-On first launch Whisper downloads the model (about 500MB for `small`). After that it is cached.
+### 3. Watch
 
-### How to watch your Japanese video
+1. Start the app — a blue **CC** icon appears in the system tray
+2. Play any Japanese video in VLC, browser, MPC-HC, etc.
+3. **English subtitles** appear in the floating overlay
+4. Right-click the tray icon to **Pause**, adjust **Playback speed**, open **Settings**, browse **History**, or **Quit**
 
-1. Start **Subtitle Translator** (`run.bat`) — a blue **CC** tray icon appears.
-2. Play your Japanese video in any player (VLC, browser, MPC-HC, etc.) with audio going through the normal Windows output device.
-3. English subtitles appear in the floating overlay.
-4. Right-click the tray icon for Pause / Show-hide subtitles / Playback speed / Settings / History / Quit.
+> Audio is captured from whatever your default Windows output device plays — no browser extension or audio cable needed.
 
-Tip: keep the video audio on speakers/headphones that Windows treats as the default output. WASAPI loopback captures whatever that device is playing.
-
-If you watch at 1.25x or any other rate, set the same rate under tray → **Playback speed**. The audio is stretched back to normal before Whisper sees it, which noticeably improves accuracy.
+**Watching at 1.25× or 1.5×?** Set the same speed in tray → **Playback speed**. The audio is stretched back to normal before Whisper sees it, which noticeably improves accuracy.
 
 ---
 
