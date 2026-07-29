@@ -1,5 +1,5 @@
 faster-whisper>=1.1.0
-pyaudiowpatch>=0.7.2
+pyaudiowpatch>=0.2.12.8
 numpy>=1.26.0
 PyQt5>=5.15.9
 silero-vad>=4.0
