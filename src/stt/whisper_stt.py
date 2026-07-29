@@ -30,6 +30,20 @@ _JA_PROMPT = (
     "公民館、土俵、相撲、フェンス、横断歩道、駐車場、病院、公園、神社。"
 )
 
+# Language-specific initial prompts for the 9 major supported languages.
+# These bias Whisper toward common words in each language.
+_LANGUAGE_PROMPTS = {
+    "ja": _JA_PROMPT,
+    "zh": "这是中文语音。包含常见词汇：你好、谢谢、但是、因为、所以、问题、电脑、老师、朋友。",
+    "ko": "이것은 한국어 음성입니다. 안녕하세요, 감사합니다, 하지만, 왜냐하면, 그리고,입니다,습니다.",
+    "es": "Este es audio en español. Palabras comunes: hola, gracias, porque, pero, entonces, también, bueno, casa.",
+    "fr": "Ceci est un audio en français. Mots courants : bonjour, merci, parce que, mais, alors, très, bien, maison.",
+    "de": "Dies ist eine Audioaufnahme auf Deutsch. Häufige Wörter: hallo, danke, weil, aber, also, schon, doch, Mensch.",
+    "pt": "Este é um áudio em português. Palavras comuns: olá, obrigado, porque, mas, então, também, bom, casa.",
+    "ru": "Это аудио на русском языке. Распространённые слова: здравствуйте, спасибо, потому что, но, также, хорошо.",
+    "it": "Questo è un audio in italiano. Parole comuni: ciao, grazie, perché, ma, allora, molto, bene, casa.",
+}
+
 
 def japanese_ratio(text: str) -> float:
     """Fraction of non-space characters that are kana or kanji."""
@@ -112,6 +126,7 @@ class WhisperSTT:
         self._load_error: Optional[str] = None
         self._prev_ja = ""
         self._prev_en = ""
+        self._detected_language: str = ""
 
     def set_playback_speed(self, speed: float) -> float:
         """Update playback speed at runtime (clamped to 0.75–1.5)."""
@@ -177,11 +192,22 @@ class WhisperSTT:
         audio: np.ndarray,
         task: str,
         initial_prompt: Optional[str] = None,
-    ) -> str:
-        """Run a single Whisper pass. task is 'transcribe' or 'translate'."""
+        language: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        """Run a single Whisper pass. task is 'transcribe' or 'translate'.
+
+        When language is None and self.language is "auto", passes language=None
+        to the model which triggers auto-detection. The detected language code
+        is returned as the second element.
+        Returns:
+            Tuple of (transcribed_text, detected_language_code)
+        """
         assert self._model is not None
+        resolved_lang = language if language is not None else (
+            None if self.language == "auto" else self.language
+        )
         kwargs = dict(
-            language=self.language,
+            language=resolved_lang,
             task=task,
             beam_size=self.beam_size,
             vad_filter=False,
@@ -194,52 +220,69 @@ class WhisperSTT:
         if initial_prompt:
             kwargs["initial_prompt"] = initial_prompt
         segments, _info = self._model.transcribe(audio, **kwargs)
-        return " ".join(seg.text for seg in segments).strip()
+        text = " ".join(seg.text for seg in segments).strip()
+        detected = _info.language if hasattr(_info, "language") else (language or self.language or "??")
+        return text, detected
 
-    def transcribe_source(self, audio: np.ndarray) -> str:
-        """Single pass: what was heard, in the source language."""
+    def transcribe_source(self, audio: np.ndarray, lang_hint: str = "") -> str:
+        """Single pass: what was heard, in the source language.
+
+        Args:
+            audio: Audio array to transcribe.
+            lang_hint: Language code hint for prompt selection (e.g. from
+                       previous detection). Falls back to self.language.
+        """
         if len(audio) == 0:
             return ""
         self.load()
-        prompt = _JA_PROMPT
+        lang_key = lang_hint or self.language
+        base_prompt = _LANGUAGE_PROMPTS.get(lang_key, "")
+        prompt = base_prompt
         if self._prev_ja:
-            prompt = f"{_JA_PROMPT} {self._prev_ja}"[-800:]
+            prompt = f"{base_prompt} {self._prev_ja}"[-800:] if base_prompt else self._prev_ja[-800:]
         try:
             audio = stretch_audio(audio, self.playback_speed)
-            return self._run(audio, task="transcribe", initial_prompt=prompt)
+            result, detected = self._run(audio, task="transcribe", initial_prompt=prompt, language=lang_hint or None)
+            self._detected_language = detected
+            return result
         except Exception as exc:
             logger.error("Transcription error: %s", exc)
             return ""
 
-    def translate_to_english(self, audio: np.ndarray, heard: str = "") -> str:
+    def translate_to_english(self, audio: np.ndarray, heard: str = "") -> Tuple[str, str]:
         """Single pass: English subtitle text.
 
         `heard` (if available) is fed in as vocabulary bias alongside the
         previous English line, which reduces hallucinated names and numbers.
+
+        Returns:
+            Tuple of (translated_text, detected_language_code)
         """
         if len(audio) == 0:
-            return ""
+            return "", self._detected_language or self.language
         self.load()
         parts = []
         if self._prev_en:
             parts.append(self._prev_en)
         if heard:
-            parts.append(f"(Japanese: {heard})")
+            lang_label = self._detected_language.upper() if self._detected_language else "SOURCE"
+            parts.append(f"({lang_label}: {heard})")
         prompt = " ".join(parts)[-800:] or None
         try:
             audio = stretch_audio(audio, self.playback_speed)
-            result = self._run(audio, task="translate", initial_prompt=prompt)
-            if prompt and is_untranslated(result):
+            result, detected = self._run(audio, task="translate", initial_prompt=prompt)
+            self._detected_language = detected
+            if prompt and self._detected_language == "ja" and is_untranslated(result):
                 # Whisper sometimes echoes the source instead of translating.
                 # The prompt is the usual trigger, so retry without context.
-                retry = self._run(audio, task="translate", initial_prompt=None)
+                retry, _ = self._run(audio, task="translate", initial_prompt=None)
                 if retry and not is_untranslated(retry):
                     logger.debug("Recovered untranslated line by dropping prompt")
-                    return retry
-            return result
+                    return retry, detected
+            return result, detected
         except Exception as exc:
             logger.error("Translation error: %s", exc)
-            return ""
+            return "", self._detected_language or self.language
 
     def commit_context(self, heard: str, translated: str) -> None:
         """Remember an emitted line so the next clause gets it as context."""
@@ -250,18 +293,26 @@ class WhisperSTT:
         if translated and not is_untranslated(translated):
             self._prev_en = translated
 
-    def process(self, audio: np.ndarray) -> Tuple[str, str]:
-        """Both passes: return (heard_source, translated_english)."""
+    def process(self, audio: np.ndarray) -> Tuple[str, str, str]:
+        """Both passes: return (heard_source, translated_english, detected_lang)."""
         heard = self.transcribe_source(audio)
-        translated = self.translate_to_english(audio, heard)
+        translated, detected = self.translate_to_english(audio, heard)
         self.commit_context(heard, translated)
-        return heard, translated
+        return heard, translated, detected
 
     def transcribe(self, audio: np.ndarray) -> str:
         """Backward-compatible: return English translation only."""
-        translated = self.translate_to_english(audio)
+        translated, _ = self.translate_to_english(audio)
         self.commit_context("", translated)
         return translated
+
+    @property
+    def detected_language(self) -> str:
+        return self._detected_language
+
+    @detected_language.setter
+    def detected_language(self, value: str):
+        self._detected_language = value
 
     @property
     def is_loaded(self) -> bool:

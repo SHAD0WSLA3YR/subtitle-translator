@@ -74,6 +74,7 @@ class SubtitleApp:
         self._clause_start_time: Optional[datetime.datetime] = None
         self._capture_retries = 0
         self._max_capture_retries = 5
+        self._current_detected_lang: str = ""
         self._settings_dialog: Optional[SettingsDialog] = None
         self._compare: Optional[ComparisonLogger] = None
 
@@ -259,10 +260,13 @@ class SubtitleApp:
         else:
             self.overlay.hide_by_user()
 
-    def _on_translation_ui(self, heard_text: str, translated_text: str):
+    def _on_translation_ui(self, heard_text: str, translated_text: str, detected_lang: str = ""):
         """Called on Qt main thread via pipeline signal (thread-safe for overlay)."""
+        self._current_detected_lang = detected_lang
         display = translated_text or heard_text
         self.overlay.show_subtitle(display)
+        if detected_lang and hasattr(self.overlay, "set_detected_language"):
+            self.overlay.set_detected_language(detected_lang)
 
         try:
             self.history.log_subtitle(heard_text, translated_text)
@@ -431,7 +435,10 @@ class SubtitleApp:
         print("=" * 55)
         print(f"  Model:     {model_cfg.get('size', 'small')} (beam {model_cfg.get('beam_size', 3)})")
         print(f"  Device:    {model_cfg.get('device', 'cuda')}")
-        print(f"  Language:  {model_cfg.get('language', 'ja')}")
+        lang_display = model_cfg.get("language", "auto")
+        if lang_display == "auto":
+            lang_display = "Auto-detect"
+        print(f"  Language:  {lang_display}")
         print(f"  Speed:     {audio_cfg.get('playback_speed', 1.0)}x (set to match player)")
         print(f"  Passes:    {'2 (translate + source)' if self._compare_path else '1 (translate only)'}")
         print(f"  LLM:       {'enabled' if llm_enabled else 'disabled'}")

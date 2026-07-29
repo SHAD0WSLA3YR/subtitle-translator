@@ -16,26 +16,41 @@ from .whisper_stt import WhisperSTT
 
 logger = logging.getLogger(__name__)
 
-# Japanese endings that usually mean a finished clause/sentence
-_COMPLETE_ENDINGS = (
-    "。", "！", "？", "!", "?",
-    "です", "ます", "でした", "ました", "ません", "でしたね",
-    "ですね", "ますね", "ですよ", "ますよ", "ましたよ",
-    "ましょう", "ください", "かな", "よね", "んだ", "んです",
-    "ますから", "ですから", "ですが", "ますが",
-)
+# Language-specific sentence endings for clause completion detection.
+# The processor merges incomplete clauses (mid-sentence VAD cuts) before
+# running Whisper. These endings signal that a clause is likely complete.
+_LANGUAGE_SENTENCE_ENDINGS = {
+    "ja": (
+        "。", "！", "？", "!", "?",
+        "です", "ます", "でした", "ました", "ません", "でしたね",
+        "ですね", "ますね", "ですよ", "ますよ", "ましたよ",
+        "ましょう", "ください", "かな", "よね", "んだ", "んです",
+        "ますから", "ですから", "ですが", "ますが",
+    ),
+    "zh": ("。", "！", "？", "!", "?", "了", "的", "是", "在", "有", "吗", "呢", "啊", "吧"),
+    "ko": (".", "!", "?", "습니다", "니다", "어요", "아요", "해요", "했어요", "입니다", "있습니다", "없습니다"),
+}
 
 
-def looks_complete(ja: str) -> bool:
-    """Heuristic: does this Japanese text look like a finished sentence?"""
-    if not ja:
-        return True
-    text = ja.strip()
+def looks_complete(text: str, lang: str = "") -> bool:
+    """Heuristic: does this text look like a finished sentence in the given language?
+
+    Args:
+        text: The text to check.
+        lang: Language code (ja, zh, ko, etc.). If empty, uses common endings.
+    """
     if not text:
         return True
-    if text[-1] in "。！？!?":
+    text_stripped = text.strip()
+    if not text_stripped:
         return True
-    return any(text.endswith(end) for end in _COMPLETE_ENDINGS)
+    if lang and lang in _LANGUAGE_SENTENCE_ENDINGS:
+        endings = _LANGUAGE_SENTENCE_ENDINGS[lang]
+    else:
+        endings = (".", "!", "?", "。", "！", "？")
+    if text_stripped[-1] in endings:
+        return True
+    return any(text_stripped.endswith(end) for end in endings)
 
 
 def looks_complete_en(text: str) -> bool:
@@ -91,6 +106,10 @@ class TranslationProcessor:
         # Pending incomplete clause (audio already transcribed once as incomplete)
         self._pending_audio: Optional[np.ndarray] = None
         self._pending_heard: str = ""
+        self._pending_lang: str = ""
+
+        # Last detected language from Whisper (used for clause merging decisions)
+        self._last_detected_lang: str = ""
 
         self.clauses_received = 0
         self.clauses_transcribed = 0
@@ -135,17 +154,18 @@ class TranslationProcessor:
 
         self._queue.put_nowait(audio)
 
-    def _emit(self, heard: str, translated: str, duration: float, elapsed: float) -> None:
+    def _emit(self, heard: str, translated: str, duration: float, elapsed: float, detected_lang: str = "") -> None:
         self.clauses_transcribed += 1
         if heard or translated:
+            lang_tag = detected_lang.upper() if detected_lang else "??"
             if heard:
                 logger.info(
-                    "[%.2fs→%.2fs] JA: %s | EN: %s",
-                    duration, elapsed, heard[:60], (translated or "")[:60],
+                    "[%.2fs→%.2fs] [%s] %s | EN: %s",
+                    duration, elapsed, lang_tag, heard[:60], (translated or "")[:60],
                 )
             else:
                 logger.info(
-                    "[%.2fs→%.2fs] EN: %s", duration, elapsed, (translated or "")[:80]
+                    "[%.2fs→%.2fs] [%s] EN: %s", duration, elapsed, lang_tag, (translated or "")[:80]
                 )
             if self._on_translation:
                 self._on_translation(heard or "", translated or "")
@@ -156,17 +176,21 @@ class TranslationProcessor:
             return
         audio = self._pending_audio
         heard = self._pending_heard
+        lang = self._pending_lang
         self._pending_audio = None
         self._pending_heard = ""
+        self._pending_lang = ""
         t0 = time.perf_counter()
-        translated = self._stt.translate_to_english(audio, heard)
+        translated, detected = self._stt.translate_to_english(audio, heard)
+        self._last_detected_lang = detected or lang
         self._stt.commit_context(heard, translated)
-        self._emit(heard, translated, len(audio) / 16000, time.perf_counter() - t0)
+        self._emit(heard, translated, len(audio) / 16000, time.perf_counter() - t0, detected_lang=self._last_detected_lang)
 
-    def _hold(self, audio: np.ndarray, heard: str) -> None:
+    def _hold(self, audio: np.ndarray, heard: str, lang: str = "") -> None:
         self._pending_audio = audio
         self._pending_heard = heard
-        logger.debug("Holding incomplete clause for merge")
+        self._pending_lang = lang
+        logger.debug("Holding incomplete clause for merge (lang=%s)", lang or "?")
 
     def _process_loop(self) -> None:
         while self._running:
@@ -203,23 +227,31 @@ class TranslationProcessor:
 
                 # The source pass costs a full extra Whisper run, so it only
                 # runs when someone needs the text (comparison logging).
-                heard = self._stt.transcribe_source(audio) if self._dual_pass else ""
-                if heard and mergeable and not looks_complete(heard):
-                    self._hold(audio, heard)
+                if self._dual_pass:
+                    heard = self._stt.transcribe_source(audio, lang_hint=self._last_detected_lang)
+                    detected_lang = self._stt.detected_language
+                    self._last_detected_lang = detected_lang
+                else:
+                    heard = ""
+                    detected_lang = self._last_detected_lang
+
+                if heard and mergeable and not looks_complete(heard, detected_lang):
+                    self._hold(audio, heard, detected_lang)
                     continue
 
-                translated = self._stt.translate_to_english(audio, heard)
+                translated, detected = self._stt.translate_to_english(audio, heard)
+                self._last_detected_lang = detected or detected_lang
                 if (
                     not self._dual_pass
                     and translated
                     and mergeable
                     and not looks_complete_en(translated)
                 ):
-                    self._hold(audio, heard)
+                    self._hold(audio, heard, self._last_detected_lang)
                     continue
 
                 self._stt.commit_context(heard, translated)
-                self._emit(heard, translated, duration, time.perf_counter() - t0)
+                self._emit(heard, translated, duration, time.perf_counter() - t0, detected_lang=self._last_detected_lang)
 
             except Exception as e:
                 logger.error("Clause processing error: %s", e)
@@ -247,6 +279,10 @@ class TranslationProcessor:
     @property
     def stt(self) -> WhisperSTT:
         return self._stt
+
+    @property
+    def detected_language(self) -> str:
+        return self._last_detected_lang
 
     @property
     def queue_size(self) -> int:

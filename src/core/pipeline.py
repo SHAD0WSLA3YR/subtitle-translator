@@ -37,7 +37,7 @@ class PipelineController(QObject):
 
     state_changed = pyqtSignal(PipelineState)
     error_occurred = pyqtSignal(str)
-    translation_output = pyqtSignal(str, str)  # heard_ja, translated_en
+    translation_output = pyqtSignal(str, str, str)  # heard_text, translated_text, detected_lang
     translation_refined = pyqtSignal(str)  # refined_text (async update)
 
     def __init__(self, capture, vad, processor, overlay, refiner=None, parent=None):
@@ -103,14 +103,14 @@ class PipelineController(QObject):
         self.state_changed.emit(self._state)
         logger.info("Pipeline stopped")
 
-    def _on_translation(self, heard: str, translated: str):
+    def _on_translation(self, heard: str, translated: str, detected_lang: str = ""):
         """Called from the processor (non-Qt) thread.
 
         Emits Whisper output immediately so the overlay stays responsive, then
         optionally polishes the English line via LLM on a separate worker.
         """
         display = translated or heard
-        self.translation_output.emit(heard or "", display)
+        self.translation_output.emit(heard or "", display, detected_lang)
         if self._refiner and self._refiner.enabled and translated:
             threading.Thread(
                 target=self._refine_async,
