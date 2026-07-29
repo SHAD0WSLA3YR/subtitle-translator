@@ -118,7 +118,7 @@ class SubtitleOverlay(QWidget):
             else QRect(0, 0, 1920, 1080)
         )
         if width is None or width <= 0:
-            width = max(640, int(screen.width() * 0.9))
+            width = max(640, int(screen.width() * 0.55))
         width = max(MIN_WIDTH, width)
 
         self._default_x = x if x is not None else (screen.width() - width) // 2

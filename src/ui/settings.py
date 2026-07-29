@@ -59,7 +59,7 @@ def _default_geometry(height: int) -> tuple:
         if QApplication.instance()
         else QRect(0, 0, 1920, 1080)
     )
-    width = max(640, int(screen.width() * 0.9))
+    width = max(640, int(screen.width() * 0.55))
     return width, (screen.width() - width) // 2, int(screen.height() * 0.78)
 
 

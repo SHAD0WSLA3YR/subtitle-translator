@@ -104,7 +104,7 @@ class HistoryDialog(QDialog):
         if not subtitles:
             self.subtitle_text.setPlainText("(no subtitles recorded)")
             return
-        lines = [refined for _, _, _, refined in subtitles]
+        lines = [refined for _, _, _, refined, _ in subtitles]
         self.subtitle_text.setPlainText("\n".join(lines))
 
     def _copy_subtitles(self):
