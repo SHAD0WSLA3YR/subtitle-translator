@@ -85,6 +85,10 @@ class TrayIcon(QSystemTrayIcon):
         self._pause_action.triggered.connect(self._on_toggle)
         self._menu.addAction(self._pause_action)
 
+        self._lang_action = QAction("Language: --", self._menu)
+        self._lang_action.setEnabled(False)
+        self._menu.addAction(self._lang_action)
+
         self._overlay_action = QAction("\U0001f5a5 Hide subtitles", self._menu)
         self._overlay_action.triggered.connect(self.toggle_overlay.emit)
         self._menu.addAction(self._overlay_action)
@@ -149,6 +153,18 @@ class TrayIcon(QSystemTrayIcon):
             else:
                 self._pause_action.setText("\u23f8 Pause")
             self.setToolTip(self._tooltip_text())
+
+    def set_detected_language(self, lang_code: str) -> None:
+        if not lang_code:
+            self._lang_action.setText("Language: --")
+            return
+        display_name = {
+            "ja": "Japanese", "zh": "Chinese", "ko": "Korean",
+            "es": "Spanish", "fr": "French", "de": "German",
+            "pt": "Portuguese", "ru": "Russian", "it": "Italian",
+            "en": "English",
+        }.get(lang_code, lang_code.upper())
+        self._lang_action.setText(f"Language: {display_name}")
 
     def set_overlay_visible(self, visible: bool):
         """Keep the tray menu label in sync with overlay visibility."""

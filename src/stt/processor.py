@@ -168,7 +168,7 @@ class TranslationProcessor:
                     "[%.2fs→%.2fs] [%s] EN: %s", duration, elapsed, lang_tag, (translated or "")[:80]
                 )
             if self._on_translation:
-                self._on_translation(heard or "", translated or "")
+                self._on_translation(heard or "", translated or "", detected_lang)
 
     def _flush_pending(self) -> None:
         """Force-process any held incomplete clause."""

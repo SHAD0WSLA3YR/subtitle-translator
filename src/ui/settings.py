@@ -19,8 +19,9 @@ from src.ui.overlay import BG_COLORS, DEFAULTS, FONT_COLORS
 
 logger = logging.getLogger(__name__)
 
-# Language code mapping
+# Language code mapping (first entry is the default)
 LANGUAGE_NAMES = {
+    "Auto (Detect)": "auto",
     "Japanese": "ja",
     "English": "en",
     "Chinese": "zh",
@@ -89,16 +90,18 @@ class SettingsDialog(QDialog):
         lang_group = QGroupBox("Language")
         lang_layout = QFormLayout(lang_group)
 
-        names = sorted(LANGUAGE_NAMES.keys())
+        names = sorted(k for k in LANGUAGE_NAMES if k != "Auto (Detect)")
+        names.insert(0, "Auto (Detect)")
         self.source_combo = QComboBox()
         self.source_combo.addItems(names)
         self.source_combo.setCurrentText(
-            CODE_TO_NAME.get(model_cfg.get("language", "ja"), "Japanese")
+            CODE_TO_NAME.get(model_cfg.get("language", "auto"), "Auto (Detect)")
         )
         lang_layout.addRow("Source Language:", self.source_combo)
 
+        target_names = sorted(k for k in LANGUAGE_NAMES if k != "Auto (Detect)")
         self.target_combo = QComboBox()
-        self.target_combo.addItems(names)
+        self.target_combo.addItems(target_names)
         self.target_combo.setCurrentText(
             CODE_TO_NAME.get(model_cfg.get("target_language", "en"), "English")
         )
@@ -274,8 +277,15 @@ class SettingsDialog(QDialog):
         return slider, row, label
 
     def _validate_language(self):
-        if self.source_combo.currentText() == self.target_combo.currentText():
+        src = self.source_combo.currentText()
+        tgt = self.target_combo.currentText()
+        if src == "Auto (Detect)":
+            self.lang_warning.setText("Language will be detected automatically from speech")
+            self.lang_warning.setStyleSheet("color: gray; font-size: 11px;")
+            self.lang_warning.show()
+        elif src == tgt:
             self.lang_warning.setText("Source and target should differ!")
+            self.lang_warning.setStyleSheet("color: orange; font-size: 11px;")
             self.lang_warning.show()
         else:
             self.lang_warning.hide()
@@ -320,7 +330,7 @@ class SettingsDialog(QDialog):
         overlay["max_lines"] = self.lines_spin.value()
 
         model = self.config.setdefault("model", {})
-        model["language"] = NAME_TO_CODE.get(self.source_combo.currentText(), "ja")
+        model["language"] = NAME_TO_CODE.get(self.source_combo.currentText(), "auto")
         model["target_language"] = NAME_TO_CODE.get(
             self.target_combo.currentText(), "en"
         )

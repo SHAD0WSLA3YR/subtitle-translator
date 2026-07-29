@@ -53,9 +53,15 @@ class HistoryManager:
                 timestamp TEXT NOT NULL,
                 raw_text TEXT,
                 refined_text TEXT,
+                detected_lang TEXT DEFAULT '',
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             )
         """)
+        # Migration: add detected_lang column for databases created before v2
+        try:
+            self._conn.execute("ALTER TABLE subtitles ADD COLUMN detected_lang TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self._conn.commit()
 
     def start_session(self, source: str = "ja", target: str = "en"):
@@ -70,13 +76,13 @@ class HistoryManager:
         self._conn.commit()
         logger.debug("Session started: id=%d", self._session_id)
 
-    def log_subtitle(self, raw: str, refined: Optional[str] = None):
+    def log_subtitle(self, raw: str, refined: Optional[str] = None, detected_lang: str = ""):
         """Log a subtitle entry for the current session."""
         if self._session_id is None:
             return
         self._conn.execute(
-            "INSERT INTO subtitles (session_id, timestamp, raw_text, refined_text) VALUES (?, ?, ?, ?)",
-            (self._session_id, datetime.datetime.now().isoformat(), raw, refined),
+            "INSERT INTO subtitles (session_id, timestamp, raw_text, refined_text, detected_lang) VALUES (?, ?, ?, ?, ?)",
+            (self._session_id, datetime.datetime.now().isoformat(), raw, refined, detected_lang or ""),
         )
         self._conn.execute(
             "UPDATE sessions SET subtitle_count = subtitle_count + 1 WHERE id = ?",
@@ -107,8 +113,8 @@ class HistoryManager:
     def get_session_subtitles(self, session_id: int):
         """Return all subtitles for a given session."""
         return self._conn.execute(
-            "SELECT id, timestamp, raw_text, COALESCE(refined_text, raw_text) "
-            "FROM subtitles WHERE session_id = ? ORDER BY timestamp",
+            "SELECT id, timestamp, raw_text, COALESCE(refined_text, raw_text), "
+            "COALESCE(detected_lang, '') FROM subtitles WHERE session_id = ? ORDER BY timestamp",
             (session_id,),
         ).fetchall()
 

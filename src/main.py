@@ -265,11 +265,13 @@ class SubtitleApp:
         self._current_detected_lang = detected_lang
         display = translated_text or heard_text
         self.overlay.show_subtitle(display)
-        if detected_lang and hasattr(self.overlay, "set_detected_language"):
-            self.overlay.set_detected_language(detected_lang)
+        if detected_lang:
+            if hasattr(self.overlay, "set_detected_language"):
+                self.overlay.set_detected_language(detected_lang)
+            self.tray.set_detected_language(detected_lang)
 
         try:
-            self.history.log_subtitle(heard_text, translated_text)
+            self.history.log_subtitle(heard_text, translated_text, detected_lang=detected_lang)
         except Exception as e:
             logger.debug("History log failed: %s", e)
 

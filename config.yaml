@@ -6,7 +6,7 @@ model:
   compute_type: int8_float16 # float16, int8_float16, int8 (use int8 on cpu)
   beam_size: 3               # 1-2 fastest, 5 most accurate
   cpu_threads: 4             # cap CPU usage when running on cpu / for the encoder
-  language: ja               # Source language code (ja, en, zh, ko, etc.)
+  language: auto             # auto = auto-detect, or specify a code (ja, zh, es, etc.) (ja, en, zh, ko, etc.)
   target_language: en        # Target language for display / history
 
 vad:

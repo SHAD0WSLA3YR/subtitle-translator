@@ -144,6 +144,22 @@ class SubtitleOverlay(QWidget):
             "color: rgba(255,255,255,120); font-size: 11px; background: transparent;"
         )
         top_bar.addWidget(self._hint)
+
+        self._lang_label = QLabel("", self)
+        self._lang_label.setFixedHeight(TOPBAR_HEIGHT)
+        self._lang_label.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 180);
+                font-size: 11px;
+                padding: 0 6px;
+                background: rgba(0, 0, 0, 100);
+                border-radius: 3px;
+            }
+        """)
+        self._lang_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._lang_label.hide()
+        top_bar.addWidget(self._lang_label)
+
         top_bar.addStretch(1)
 
         self._min_button = self._make_button("–", "Minimize to one line")
@@ -170,6 +186,10 @@ class SubtitleOverlay(QWidget):
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self._on_auto_hide)
+
+        self._lang_badge_timer = QTimer(self)
+        self._lang_badge_timer.setSingleShot(True)
+        self._lang_badge_timer.timeout.connect(self._lang_label.hide)
 
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade.setDuration(220)
@@ -198,6 +218,26 @@ class SubtitleOverlay(QWidget):
             }
         """)
         return button
+
+    def set_detected_language(self, lang_code: str) -> None:
+        """Show detected language badge in the top bar."""
+        if not lang_code:
+            self._lang_label.hide()
+            return
+        display_name = self._lang_code_to_name(lang_code)
+        self._lang_label.setText(display_name)
+        self._lang_label.show()
+        self._lang_badge_timer.start(10000)
+
+    @staticmethod
+    def _lang_code_to_name(code: str) -> str:
+        names = {
+            "ja": "Japanese", "zh": "Chinese", "ko": "Korean",
+            "es": "Spanish", "fr": "French", "de": "German",
+            "pt": "Portuguese", "ru": "Russian", "it": "Italian",
+            "en": "English",
+        }
+        return names.get(code, code.upper())
 
     def _apply_text_style(self) -> None:
         r, g, b = FONT_COLORS[self._font_color]
@@ -349,6 +389,8 @@ class SubtitleOverlay(QWidget):
     def _reset_hide_timer(self) -> None:
         self._hide_timer.stop()
         self._hide_timer.start(int(self._auto_hide_delay * 1000))
+        self._lang_badge_timer.stop()
+        self._lang_badge_timer.start(10000)
 
     def _disconnect_fade_finished(self) -> None:
         try:
