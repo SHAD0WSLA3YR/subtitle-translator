@@ -1,0 +1,54 @@
+# Real-Time Subtitle Translator Configuration
+
+model:
+  size: small                # tiny/base = faster; small = good JP; medium = best quality
+  device: cuda               # cuda or cpu
+  compute_type: int8_float16 # float16, int8_float16, int8 (use int8 on cpu)
+  beam_size: 3               # 1-2 fastest, 5 most accurate
+  cpu_threads: 4             # cap CPU usage when running on cpu / for the encoder
+  language: ja               # Source language code (ja, en, zh, ko, etc.)
+  target_language: en        # Target language for display / history
+
+vad:
+  threshold: 0.35
+  min_speech_duration_ms: 500
+  min_silence_duration_ms: 1100  # wait longer — mid-sentence cuts hurt translation
+  speech_pad_ms: 350
+  max_speech_duration_ms: 8000   # force-split long speech so Whisper stays fast
+  silence_floor: 0.004           # skip neural VAD below this peak amplitude
+
+llm:
+  enabled: false
+  provider: openrouter
+  model: openrouter/free
+  api_key_env: LLM_API_KEY
+  temperature: 0.1
+  max_tokens: 256
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  blocksize: 512
+  device: null
+  # Match YouTube/player speed. Supported: 0.75, 1.0, 1.25, 1.5
+  # Change anytime from tray → Playback speed (applies live).
+  playback_speed: 1.0
+
+overlay:
+  x: null
+  y: null
+  width: null
+  height: 180
+  font_size: 26
+  font_color: White      # White, Yellow, Black, Red, Grey, Green, Cyan
+  font_opacity: 255      # 40-255
+  bg_color: Black        # Black, Grey, White, Blur, None
+  opacity: 200           # background opacity, 0-255
+  auto_hide_delay: 6.0
+  max_lines: 3
+
+compare:
+  # Logs heard Japanese next to the English translation, but costs a second
+  # Whisper pass per clause (~2x GPU work). Enable only for accuracy testing,
+  # or run: python run.py --compare
+  enabled: false

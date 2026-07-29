@@ -1,0 +1,9 @@
+faster-whisper>=1.1.0
+pyaudiowpatch>=0.7.2
+numpy>=1.26.0
+PyQt5>=5.15.9
+silero-vad>=4.0
+onnxruntime>=1.16.0
+pyyaml>=6.0
+requests>=2.31.0
+torch>=2.0.0

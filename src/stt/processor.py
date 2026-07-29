@@ -1,0 +1,253 @@
+"""Orchestrator connecting VAD clause detection to Whisper transcription.
+
+Merges incomplete Japanese clauses (mid-sentence VAD cuts) before running
+Whisper, then emits (heard_source, translated_english).
+"""
+
+import logging
+import queue
+import threading
+import time
+from typing import Callable, Optional
+
+import numpy as np
+
+from .whisper_stt import WhisperSTT
+
+logger = logging.getLogger(__name__)
+
+# Japanese endings that usually mean a finished clause/sentence
+_COMPLETE_ENDINGS = (
+    "。", "！", "？", "!", "?",
+    "です", "ます", "でした", "ました", "ません", "でしたね",
+    "ですね", "ますね", "ですよ", "ますよ", "ましたよ",
+    "ましょう", "ください", "かな", "よね", "んだ", "んです",
+    "ますから", "ですから", "ですが", "ますが",
+)
+
+
+def looks_complete(ja: str) -> bool:
+    """Heuristic: does this Japanese text look like a finished sentence?"""
+    if not ja:
+        return True
+    text = ja.strip()
+    if not text:
+        return True
+    if text[-1] in "。！？!?":
+        return True
+    return any(text.endswith(end) for end in _COMPLETE_ENDINGS)
+
+
+def looks_complete_en(text: str) -> bool:
+    """Completeness check for English, used when the source pass is off."""
+    if not text:
+        return True
+    stripped = text.strip().rstrip('"\'”’)')
+    if not stripped:
+        return True
+    return stripped[-1] in ".!?。"
+
+
+class TranslationProcessor:
+    """Orchestrates VAD → (optional merge) → Whisper pipeline.
+
+    Callback signature: on_translation(heard: str, translated: str)
+    """
+
+    def __init__(
+        self,
+        model_size: str = "small",
+        device: str = "cuda",
+        compute_type: str = "int8_float16",
+        language: str = "ja",
+        beam_size: int = 3,
+        playback_speed: float = 1.0,
+        max_queued: int = 10,
+        merge_incomplete: bool = True,
+        max_merge_seconds: float = 10.0,
+        max_clause_seconds: float = 12.0,
+        dual_pass: bool = False,
+        cpu_threads: int = 4,
+    ):
+        self._stt = WhisperSTT(
+            model_size=model_size,
+            device=device,
+            compute_type=compute_type,
+            language=language,
+            beam_size=beam_size,
+            playback_speed=playback_speed,
+            cpu_threads=cpu_threads,
+        )
+        self._queue: queue.Queue[np.ndarray] = queue.Queue()
+        self._max_queued = max_queued
+        self._merge_incomplete = merge_incomplete
+        self._dual_pass = dual_pass
+        self._max_merge_samples = int(16000 * max_merge_seconds)
+        self._max_clause_samples = int(16000 * max_clause_seconds)
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+        self._on_translation: Optional[Callable[[str, str], None]] = None
+
+        # Pending incomplete clause (audio already transcribed once as incomplete)
+        self._pending_audio: Optional[np.ndarray] = None
+        self._pending_heard: str = ""
+
+        self.clauses_received = 0
+        self.clauses_transcribed = 0
+        self.clauses_dropped = 0
+        self.clauses_merged = 0
+
+    def load_model(self) -> None:
+        self._stt.load()
+
+    def start(
+        self,
+        on_translation: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
+        if self._running:
+            return
+        self._on_translation = on_translation
+        self._running = True
+        self.load_model()
+        self._thread = threading.Thread(
+            target=self._process_loop, daemon=True, name="stt-processor"
+        )
+        self._thread.start()
+        logger.info(
+            "TranslationProcessor started (merge_incomplete=%s, dual_pass=%s, speed=%.2fx)",
+            self._merge_incomplete,
+            self._dual_pass,
+            self._stt.playback_speed,
+        )
+
+    def add_clause(self, audio: np.ndarray) -> None:
+        if not self._running:
+            return
+
+        self.clauses_received += 1
+
+        if self._queue.qsize() >= self._max_queued:
+            try:
+                self._queue.get_nowait()
+                self.clauses_dropped += 1
+            except queue.Empty:
+                pass
+
+        self._queue.put_nowait(audio)
+
+    def _emit(self, heard: str, translated: str, duration: float, elapsed: float) -> None:
+        self.clauses_transcribed += 1
+        if heard or translated:
+            if heard:
+                logger.info(
+                    "[%.2fs→%.2fs] JA: %s | EN: %s",
+                    duration, elapsed, heard[:60], (translated or "")[:60],
+                )
+            else:
+                logger.info(
+                    "[%.2fs→%.2fs] EN: %s", duration, elapsed, (translated or "")[:80]
+                )
+            if self._on_translation:
+                self._on_translation(heard or "", translated or "")
+
+    def _flush_pending(self) -> None:
+        """Force-process any held incomplete clause."""
+        if self._pending_audio is None:
+            return
+        audio = self._pending_audio
+        heard = self._pending_heard
+        self._pending_audio = None
+        self._pending_heard = ""
+        t0 = time.perf_counter()
+        translated = self._stt.translate_to_english(audio, heard)
+        self._stt.commit_context(heard, translated)
+        self._emit(heard, translated, len(audio) / 16000, time.perf_counter() - t0)
+
+    def _hold(self, audio: np.ndarray, heard: str) -> None:
+        self._pending_audio = audio
+        self._pending_heard = heard
+        logger.debug("Holding incomplete clause for merge")
+
+    def _process_loop(self) -> None:
+        while self._running:
+            try:
+                audio = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            try:
+                if self._pending_audio is not None:
+                    combined = np.concatenate([self._pending_audio, audio])
+                    if len(combined) > self._max_merge_samples:
+                        self._flush_pending()
+                    else:
+                        audio = combined
+                        self._pending_audio = None
+                        self._pending_heard = ""
+                        self.clauses_merged += 1
+
+                # Hard cap — Whisper on 30s+ audio can take a minute+
+                if len(audio) > self._max_clause_samples:
+                    logger.warning(
+                        "Clause %.1fs exceeds max %.1fs — truncating",
+                        len(audio) / 16000,
+                        self._max_clause_samples / 16000,
+                    )
+                    audio = audio[-self._max_clause_samples :]
+
+                duration = len(audio) / 16000
+                mergeable = (
+                    self._merge_incomplete and len(audio) < self._max_merge_samples
+                )
+                t0 = time.perf_counter()
+
+                # The source pass costs a full extra Whisper run, so it only
+                # runs when someone needs the text (comparison logging).
+                heard = self._stt.transcribe_source(audio) if self._dual_pass else ""
+                if heard and mergeable and not looks_complete(heard):
+                    self._hold(audio, heard)
+                    continue
+
+                translated = self._stt.translate_to_english(audio, heard)
+                if (
+                    not self._dual_pass
+                    and translated
+                    and mergeable
+                    and not looks_complete_en(translated)
+                ):
+                    self._hold(audio, heard)
+                    continue
+
+                self._stt.commit_context(heard, translated)
+                self._emit(heard, translated, duration, time.perf_counter() - t0)
+
+            except Exception as e:
+                logger.error("Clause processing error: %s", e)
+
+        # Shutdown flush
+        try:
+            self._flush_pending()
+        except Exception:
+            pass
+
+    def stop(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+        logger.info(
+            "TranslationProcessor stopped: %d received, %d transcribed, "
+            "%d dropped, %d merged",
+            self.clauses_received,
+            self.clauses_transcribed,
+            self.clauses_dropped,
+            self.clauses_merged,
+        )
+
+    @property
+    def stt(self) -> WhisperSTT:
+        return self._stt
+
+    @property
+    def queue_size(self) -> int:
+        return self._queue.qsize()
