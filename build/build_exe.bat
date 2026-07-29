@@ -13,6 +13,10 @@ cd /d "%~dp0\.."
 if not exist "dist" mkdir dist
 if not exist "build\work" mkdir build\work
 
+rem PyInstaller resolves --add-data relative to the spec file directory
+rem when --specpath is used, so ensure config.yaml is in build/
+if not exist "build\config.yaml" copy config.yaml build\
+
 python -m pip install -r requirements-dev.txt
 if errorlevel 1 exit /b 1
 
