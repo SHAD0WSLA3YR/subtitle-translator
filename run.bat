@@ -2,14 +2,26 @@
 title Real-Time Subtitle Translator
 cd /d "%~dp0"
 
-REM Activate virtual environment
-if exist ".venv\Scripts\activate.bat" (
+REM Activate virtual environment — create if missing
+if not exist ".venv\Scripts\activate.bat" (
+    echo [SETUP] Creating virtual environment...
+    python -m venv .venv
+    if errorlevel 1 (
+        echo [ERROR] Failed to create virtual environment. Make sure Python is installed.
+        pause
+        exit /b 1
+    )
     call .venv\Scripts\activate.bat
+    echo [SETUP] Installing dependencies...
+    pip install -r requirements.txt
+    if errorlevel 1 (
+        echo [ERROR] Failed to install dependencies.
+        pause
+        exit /b 1
+    )
+    echo [SETUP] Setup complete.
 ) else (
-    echo [ERROR] Virtual environment not found at .venv\
-    echo Run: python -m venv .venv
-    pause
-    exit /b 1
+    call .venv\Scripts\activate.bat
 )
 
 echo Starting Real-Time Japanese to English Subtitle Translator...

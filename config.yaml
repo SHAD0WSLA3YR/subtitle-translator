@@ -2,8 +2,8 @@
 
 model:
   size: small                # tiny/base = faster; small = good JP; medium = best quality
-  device: cuda               # cuda or cpu
-  compute_type: int8_float16 # float16, int8_float16, int8 (use int8 on cpu)
+  device: cpu               # cuda or cpu (auto-fallsback to cpu if cuda unavailable)
+  compute_type: int8        # float16, int8_float16, int8 (use int8 on cpu)
   beam_size: 3               # 1-2 fastest, 5 most accurate
   cpu_threads: 4             # cap CPU usage when running on cpu / for the encoder
   language: ja               # Source language code (ja, en, zh, ko, etc.)
