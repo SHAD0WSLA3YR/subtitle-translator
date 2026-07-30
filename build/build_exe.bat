@@ -13,8 +13,20 @@ cd /d "%~dp0\.."
 if not exist "dist" mkdir dist
 if not exist "build\work" mkdir build\work
 
-rem PyInstaller resolves --add-data relative to the spec file directory
-rem when --specpath is used, so ensure config.yaml is in build/
+rem PyInstaller resolves --add-data and --icon relative to the spec file
+rem directory when --specpath is used, so files needed by the build must
+rem be placed under build/ ahead of time (same reason config.yaml is copied).
+if not exist "build\assets" mkdir build\assets
+
+rem Generate the icon if it doesn't exist yet (self-healing).
+if not exist "assets\icon.ico" (
+    echo [build] Icon missing - generating...
+    python -m pip install --quiet pillow
+    python scripts\generate_icon.py
+)
+copy /y "assets\icon.ico" "build\assets\icon.ico" >nul
+
+rem config.yaml must also be under build/ for the same specpath reason.
 if not exist "build\config.yaml" copy config.yaml build\
 
 python -m pip install -r requirements-dev.txt
