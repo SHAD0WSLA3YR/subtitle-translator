@@ -1,27 +1,55 @@
 # Real-Time Subtitle Translator Configuration
+#
+# On first launch the app probes your GPU and auto-tunes beam size / model /
+# VAD silence for near-real-time subtitles. Set latency.auto_tune: false to
+# freeze these values and edit them yourself.
 
 model:
-  size: small                # tiny/base = faster; small = good JP; medium = best quality
+  size: small                # Step 3 bench winner on MX450 (~0.30 RTF batched)
   device: cuda               # cuda or cpu
   compute_type: int8_float16 # float16, int8_float16, int8 (use int8 on cpu)
-  beam_size: 3               # 1-2 fastest, 5 most accurate
+  beam_size: 1               # draft ASR beam; finals use latency.final_beam
   cpu_threads: 4             # cap CPU usage when running on cpu / for the encoder
-  language: auto             # auto = auto-detect, or specify a code (ja, zh, es, etc.) (ja, en, zh, ko, etc.)
-  target_language: en        # Target language for display / history
+  language: ja               # hard-lock Japanese ASR for learning videos (avoids EN lock bug)
+  target_language: en        # EN via local CPU / Argos — NOT Whisper task=translate
 
 vad:
   threshold: 0.35
-  min_speech_duration_ms: 500
-  min_silence_duration_ms: 1100  # wait longer — mid-sentence cuts hurt translation
-  speech_pad_ms: 350
-  max_speech_duration_ms: 8000   # force-split long speech so Whisper stays fast
+  min_speech_duration_ms: 550
+  min_silence_duration_ms: 1100  # real pause ends utterance (matches v1 — gives MT more context)
+  merge_silence_ms: 1100         # gaps shorter than this never end a clause
+  target_min_speech_ms: 3000     # hold early silence ends until ~3s content when possible
+  speech_pad_ms: 250             # pre/post-roll applied on emit
+  max_speech_duration_ms: 6000   # hard split continuous speech
   silence_floor: 0.004           # skip neural VAD below this peak amplitude
 
+latency:
+  auto_tune: true                # probe GPU and keep knobs in a realtime-safe range
+  live_partials: true            # show provisional subtitles while speech continues
+  streaming: true                # LocalAgreement-2: grey JA draft + async EN on flush
+  final_beam: 3                  # beam for flushed JA re-transcribe (never Whisper translate)
+  min_final_seconds: 1.2         # never finalize/translate scraps shorter than this
+  streaming_flush_chars: 80      # mid-utt char flush (gated by min_final)
+  streaming_flush_timeout_s: 6.0 # align with max speech
+  lag_governor: true             # drop old clauses when behind — prefer newest speech
+  translator:
+    local_provider: nllb         # primary offline MT (raw JA text → EN)
+    provider: nvidia             # optional Riva NIM (disabled until key proven)
+    model: nvidia/riva-translate-4b-instruct-v2
+    api_key_env: NVIDIA_API_KEY  # set in .env (gitignored) — never commit keys
+    rpm_limit: 40                # free-tier client counter (no health probe)
+    weekly_limit: 1000           # free-tier weekly credit counter
+    use_nvidia: false            # off: 401 / prompt-leak broke EN; NLLB is primary
+    temperature: 0.0             # Riva Translate default when re-enabled
+    context_pairs: 0             # no chat history in MT (polish is Step 5)
+  max_subtitle_age_s: 6.0        # drop overlay if EN arrives >6s behind live audio clock
+  # partial_interval_ms / max_queued are filled from the hardware profile
+
 llm:
-  enabled: false
-  provider: openrouter
-  model: openrouter/free
-  api_key_env: LLM_API_KEY
+  enabled: false                 # optional post-polish; EN now comes from translator above
+  provider: nvidia
+  model: meta/llama-3.1-8b-instruct
+  api_key_env: NVIDIA_API_KEY
   temperature: 0.1
   max_tokens: 256
 

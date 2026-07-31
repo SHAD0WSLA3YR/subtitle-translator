@@ -5,6 +5,7 @@ configurable text/background colors. Starts bottom-center.
 """
 
 import logging
+import time
 from typing import Optional
 
 from PyQt5.QtCore import (
@@ -52,9 +53,10 @@ DEFAULTS = {
 }
 
 MIN_WIDTH = 320
-MIN_HEIGHT = 90
+MIN_HEIGHT = 64
 GRIP_SIZE = 18
-TOPBAR_HEIGHT = 20
+TOPBAR_HEIGHT = 22
+TOPBAR_MARGIN = 6
 
 
 class SubtitleOverlay(QWidget):
@@ -111,6 +113,11 @@ class SubtitleOverlay(QWidget):
         self._expanded_height = max(MIN_HEIGHT, height)
         self._user_hidden = False
         self._blur_active = False
+        self._hovering = False
+        self._lang_pair_text = ""
+        self._has_provisional = False
+        self._draft_source = ""  # live source-language line (grey); not in _current_texts
+        self._last_draft_paint = 0.0
 
         screen = (
             QApplication.primaryScreen().availableGeometry()
@@ -129,50 +136,12 @@ class SubtitleOverlay(QWidget):
         # wrapped label wants more room (the setGeometry warning).
         self.setFixedSize(width, self._box_height)
 
+        # The subtitle text fills the whole box; controls float above it and
+        # only appear on hover, so the idle overlay is just text on a backdrop.
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 8, 16, 14)
-        outer.setSpacing(2)
+        outer.setContentsMargins(14, 8, 14, 10)
+        outer.setSpacing(0)
 
-        # --- Top bar: drag hint + window controls ---
-        top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(0, 0, 0, 0)
-        top_bar.setSpacing(4)
-
-        self._hint = QLabel("⠿ drag", self)
-        self._hint.setFixedHeight(TOPBAR_HEIGHT)
-        self._hint.setStyleSheet(
-            "color: rgba(255,255,255,120); font-size: 11px; background: transparent;"
-        )
-        top_bar.addWidget(self._hint)
-
-        self._lang_label = QLabel("", self)
-        self._lang_label.setFixedHeight(TOPBAR_HEIGHT)
-        self._lang_label.setStyleSheet("""
-            QLabel {
-                color: rgba(255, 255, 255, 180);
-                font-size: 11px;
-                padding: 0 6px;
-                background: rgba(0, 0, 0, 100);
-                border-radius: 3px;
-            }
-        """)
-        self._lang_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self._lang_label.hide()
-        top_bar.addWidget(self._lang_label)
-
-        top_bar.addStretch(1)
-
-        self._min_button = self._make_button("–", "Minimize to one line")
-        self._min_button.clicked.connect(self.toggle_minimized)
-        top_bar.addWidget(self._min_button)
-
-        self._close_button = self._make_button("✕", "Hide overlay (restore from tray)")
-        self._close_button.clicked.connect(self.hide_by_user)
-        top_bar.addWidget(self._close_button)
-
-        outer.addLayout(top_bar)
-
-        # --- Subtitle text ---
         self._text = QLabel(self)
         self._text.setWordWrap(True)
         self._text.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
@@ -181,7 +150,31 @@ class SubtitleOverlay(QWidget):
         self._text.setAttribute(Qt.WA_TransparentForMouseEvents)
         outer.addWidget(self._text, stretch=1)
 
+        # --- Floating controls (hover only) ---
+        self._lang_label = QLabel("", self)
+        self._lang_label.setFixedHeight(TOPBAR_HEIGHT)
+        self._lang_label.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 190);
+                font-size: 11px;
+                padding: 0 8px;
+                background: rgba(0, 0, 0, 110);
+                border-radius: 10px;
+            }
+        """)
+        self._lang_label.setAlignment(Qt.AlignCenter)
+        self._lang_label.hide()
+
+        self._min_button = self._make_button("–", "Minimize to one line")
+        self._min_button.clicked.connect(self.toggle_minimized)
+        self._min_button.hide()
+
+        self._close_button = self._make_button("✕", "Hide overlay (restore from tray)")
+        self._close_button.clicked.connect(self.hide_by_user)
+        self._close_button.hide()
+
         self._apply_text_style()
+        self._layout_floating_controls()
 
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
@@ -189,7 +182,7 @@ class SubtitleOverlay(QWidget):
 
         self._lang_badge_timer = QTimer(self)
         self._lang_badge_timer.setSingleShot(True)
-        self._lang_badge_timer.timeout.connect(self._lang_label.hide)
+        self._lang_badge_timer.timeout.connect(self._on_badge_timeout)
 
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade.setDuration(220)
@@ -206,9 +199,9 @@ class SubtitleOverlay(QWidget):
         button.setStyleSheet("""
             QPushButton {
                 color: rgba(255,255,255,170);
-                background: rgba(255,255,255,25);
+                background: rgba(255,255,255,30);
                 border: none;
-                border-radius: 9px;
+                border-radius: 11px;
                 font-size: 12px;
                 font-weight: bold;
             }
@@ -219,15 +212,35 @@ class SubtitleOverlay(QWidget):
         """)
         return button
 
-    def set_detected_language(self, lang_code: str) -> None:
-        """Show detected language badge in the top bar."""
-        if not lang_code:
+    def _layout_floating_controls(self) -> None:
+        """Pin the badge top-left and the window buttons top-right."""
+        y = TOPBAR_MARGIN
+        x = self.width() - TOPBAR_MARGIN - self._close_button.width()
+        self._close_button.move(x, y)
+        x -= self._min_button.width() + 4
+        self._min_button.move(x, y)
+        self._lang_label.adjustSize()
+        self._lang_label.setFixedHeight(TOPBAR_HEIGHT)
+        self._lang_label.move(TOPBAR_MARGIN + 2, y)
+
+    def resizeEvent(self, event) -> None:
+        self._layout_floating_controls()
+        super().resizeEvent(event)
+
+    def set_language_pair(self, src_code: str, tgt_code: str) -> None:
+        """Show a 'Japanese → English' badge; flashes when the pair changes."""
+        if not src_code:
+            self._lang_pair_text = ""
             self._lang_label.hide()
             return
-        display_name = self._lang_code_to_name(lang_code)
-        self._lang_label.setText(display_name)
-        self._lang_label.show()
-        self._lang_badge_timer.start(10000)
+        text = f"{self._lang_code_to_name(src_code)} → {self._lang_code_to_name(tgt_code or 'en')}"
+        changed = text != self._lang_pair_text
+        self._lang_pair_text = text
+        self._lang_label.setText(text)
+        self._layout_floating_controls()
+        if changed or self._hovering:
+            self._lang_label.show()
+            self._lang_badge_timer.start(4000)
 
     @staticmethod
     def _lang_code_to_name(code: str) -> str:
@@ -297,40 +310,157 @@ class SubtitleOverlay(QWidget):
             disable_blur(hwnd)
             self._blur_active = False
 
+    def _ensure_visible(self, *, fade: bool = False) -> None:
+        """Cancel any fade-out and make sure the window is actually on screen.
+
+        Fade-out completion used to leave the overlay hidden with a stuck
+        opacity; later subtitles then logged in the background but never
+        appeared until pause/resume. Always recover here.
+        """
+        if self._user_hidden:
+            return
+        self._disconnect_fade_finished()
+        self._fade.stop()
+        was_hidden = self.isHidden() or self.windowOpacity() < 0.05
+        self.show()
+        self.raise_()
+        # Recovering from a fully-hidden/faded-out state: snap visible.
+        # Soft fade is only for a fresh line while the window was already up.
+        if was_hidden or not fade:
+            self.setWindowOpacity(1.0)
+        else:
+            self.setWindowOpacity(0.0)
+            self._fade.setStartValue(0.0)
+            self._fade.setEndValue(1.0)
+            self._fade.start()
+
     def show_subtitle(self, text: str) -> None:
-        """Display a subtitle line (most recent at the bottom)."""
+        """Display a final subtitle line (most recent at the bottom).
+
+        If a source draft is showing (streaming), clear it and append the
+        stable target line. If a legacy provisional EN line is showing,
+        replace it in-place.
+        """
         if not text:
             self.clear()
             return
-        if self._user_hidden:
-            # Still track text so restoring shows recent context
+        if self._draft_source:
+            self._draft_source = ""
+            self._has_provisional = False
+            if self._user_hidden:
+                self._current_texts.append(text)
+                self._current_texts = self._current_texts[-self._max_lines:]
+                return
             self._current_texts.append(text)
-            self._current_texts = self._current_texts[-self._max_lines:]
+            if len(self._current_texts) > self._max_lines:
+                self._current_texts = self._current_texts[-self._max_lines:]
+            self._render_texts()
+            self._ensure_visible(fade=True)
+            self._reset_hide_timer()
+            self.subtitle_shown.emit(text)
             return
 
-        self._current_texts.append(text)
+        if self._user_hidden:
+            if self._has_provisional and self._current_texts:
+                self._current_texts[-1] = text
+            else:
+                self._current_texts.append(text)
+            self._current_texts = self._current_texts[-self._max_lines:]
+            self._has_provisional = False
+            return
+
+        replacing = self._has_provisional and bool(self._current_texts)
+        if replacing:
+            self._current_texts[-1] = text
+        else:
+            self._current_texts.append(text)
+        self._has_provisional = False
         if len(self._current_texts) > self._max_lines:
             self._current_texts = self._current_texts[-self._max_lines:]
 
         self._render_texts()
-        self._fade_in()
+        # Replacing a live draft: snap visible. Brand-new line: soft fade.
+        self._ensure_visible(fade=not replacing)
         self._reset_hide_timer()
         self.subtitle_shown.emit(text)
+
+    def show_source_draft(self, text: str) -> None:
+        """Grey live source-language draft (LocalAgreement). Empty clears it.
+
+        Never translated — flicker is OK. Stable English arrives via
+        ``show_subtitle`` and is append-only.
+        """
+        if not text:
+            if not self._draft_source:
+                return
+            self._draft_source = ""
+            self._has_provisional = False
+            if not self._user_hidden:
+                self._render_texts()
+            return
+
+        now = time.monotonic()
+        if (
+            self._draft_source
+            and now - self._last_draft_paint < 0.16
+            and abs(len(text) - len(self._draft_source)) < 2
+        ):
+            return
+        self._draft_source = text
+        self._last_draft_paint = now
+        self._has_provisional = True
+        if self._user_hidden:
+            return
+        self._render_texts()
+        self._ensure_visible(fade=False)
+        self._reset_hide_timer()
+
+    def show_provisional(self, text: str) -> None:
+        """Update the live in-progress subtitle without committing a new line.
+
+        Called every ~1.5s while speech continues. The next show_subtitle()
+        replaces this draft in place. Prefer ``show_source_draft`` for
+        streaming LocalAgreement source text.
+        """
+        if not text:
+            return
+        if self._user_hidden:
+            if self._has_provisional and self._current_texts:
+                self._current_texts[-1] = text
+            else:
+                self._current_texts.append(text)
+                self._current_texts = self._current_texts[-self._max_lines:]
+            self._has_provisional = True
+            return
+
+        if self._has_provisional and self._current_texts:
+            self._current_texts[-1] = text
+        else:
+            self._current_texts.append(text)
+            if len(self._current_texts) > self._max_lines:
+                self._current_texts = self._current_texts[-self._max_lines:]
+        self._has_provisional = True
+        self._render_texts()
+        self._ensure_visible(fade=False)
+        self._reset_hide_timer()
 
     def replace_last_subtitle(self, text: str) -> None:
         """Replace the most recent subtitle line in-place."""
         if not text or not self._current_texts:
             return
         self._current_texts[-1] = text
+        self._has_provisional = False
         self._render_texts()
         if not self._user_hidden:
-            self.show()
+            self._ensure_visible(fade=False)
             self._reset_hide_timer()
 
     def clear(self) -> None:
         self._disconnect_fade_finished()
         self._fade.stop()
         self._current_texts = []
+        self._draft_source = ""
+        self._has_provisional = False
         self._text.setText("")
         self._hide_timer.stop()
         self.update()
@@ -389,8 +519,31 @@ class SubtitleOverlay(QWidget):
     def _reset_hide_timer(self) -> None:
         self._hide_timer.stop()
         self._hide_timer.start(int(self._auto_hide_delay * 1000))
-        self._lang_badge_timer.stop()
-        self._lang_badge_timer.start(10000)
+
+    def _on_badge_timeout(self) -> None:
+        if not self._hovering:
+            self._lang_label.hide()
+
+    def _set_hover(self, hovering: bool) -> None:
+        self._hovering = hovering
+        self._min_button.setVisible(hovering)
+        self._close_button.setVisible(hovering)
+        if hovering:
+            if self._lang_pair_text:
+                self._lang_label.show()
+            self._hide_timer.stop()
+        else:
+            self._lang_badge_timer.start(1500)
+            self._reset_hide_timer()
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._set_hover(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._set_hover(False)
+        super().leaveEvent(event)
 
     def _disconnect_fade_finished(self) -> None:
         try:
@@ -399,10 +552,37 @@ class SubtitleOverlay(QWidget):
             pass
 
     def _render_texts(self) -> None:
-        lines = self._current_texts
+        # Stable target lines (white) + optional grey source draft on top.
+        lines = list(self._current_texts)
         if self._minimized and lines:
             lines = lines[-1:]
-        self._text.setText("\n".join(lines))
+            draft = ""
+        else:
+            draft = self._draft_source
+
+        if draft and lines:
+            # HTML: grey draft above white finals.
+            r, g, b = FONT_COLORS[self._font_color]
+            draft_html = (
+                f'<span style="color:rgba(180,180,180,{self._font_opacity});">'
+                f"{_esc(draft)}</span>"
+            )
+            finals = "<br>".join(
+                f'<span style="color:rgba({r},{g},{b},{self._font_opacity});">'
+                f"{_esc(t)}</span>"
+                for t in lines
+            )
+            self._text.setTextFormat(Qt.RichText)
+            self._text.setText(f"{draft_html}<br>{finals}")
+        elif draft:
+            self._text.setTextFormat(Qt.RichText)
+            self._text.setText(
+                f'<span style="color:rgba(180,180,180,{self._font_opacity});">'
+                f"{_esc(draft)}</span>"
+            )
+        else:
+            self._text.setTextFormat(Qt.PlainText)
+            self._text.setText("\n".join(lines))
         self.update()
 
     def _fade_in(self) -> None:
@@ -455,18 +635,22 @@ class SubtitleOverlay(QWidget):
 
         r, g, b = BG_COLORS[self._bg_color]
         border_rgb = 0 if self._bg_color == "White" else 255
-        painter.setPen(QPen(QColor(border_rgb, border_rgb, border_rgb, 45), 1))
+        # Border and resize grip only appear on hover — the idle overlay is
+        # just subtitle text on a clean rounded backdrop.
+        border_alpha = 70 if self._hovering else 0
+        painter.setPen(QPen(QColor(border_rgb, border_rgb, border_rgb, border_alpha), 1))
         painter.setBrush(QBrush(QColor(r, g, b, bg_alpha)))
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 14, 14)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 12, 12)
 
-        # Resize grip: three diagonal ticks in the bottom-right corner
-        grip = self._grip_rect()
-        painter.setPen(QPen(QColor(border_rgb, border_rgb, border_rgb, 110), 2))
-        for offset in (4, 9, 14):
-            painter.drawLine(
-                grip.right() - offset, grip.bottom() - 2,
-                grip.right() - 2, grip.bottom() - offset,
-            )
+        if self._hovering:
+            # Resize grip: three diagonal ticks in the bottom-right corner
+            grip = self._grip_rect()
+            painter.setPen(QPen(QColor(border_rgb, border_rgb, border_rgb, 110), 2))
+            for offset in (4, 9, 14):
+                painter.drawLine(
+                    grip.right() - offset, grip.bottom() - 2,
+                    grip.right() - 2, grip.bottom() - offset,
+                )
 
     # --- Mouse: drag body, resize from corner ---
 
@@ -491,7 +675,11 @@ class SubtitleOverlay(QWidget):
             self._box_height = new_h
             if not self._minimized:
                 self._expanded_height = new_h
-            self.setFixedSize(new_w, new_h)
+            # resize() during drag — setFixedSize every pixel fights Windows
+            # and floods the console with setGeometry warnings.
+            self.setMinimumSize(MIN_WIDTH, MIN_HEIGHT)
+            self.setMaximumSize(16777215, 16777215)
+            self.resize(new_w, new_h)
             event.accept()
             return
 
@@ -515,6 +703,9 @@ class SubtitleOverlay(QWidget):
         if self._resize_origin is not None:
             self._resize_origin = None
             self._resize_start_size = None
+            # Re-lock size so Windows can't grow the translucent window.
+            self.setFixedSize(self.width(), self.height())
+            self._box_height = self.height()
             self.size_changed.emit(self.width(), self.height())
         elif self._drag_offset is not None:
             self._drag_offset = None
@@ -534,3 +725,13 @@ def _clamp_byte(value) -> int:
         return max(0, min(255, int(value)))
     except (TypeError, ValueError):
         return 255
+
+
+def _esc(text: str) -> str:
+    """Minimal HTML escape for overlay rich-text draft/final lines."""
+    return (
+        (text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )

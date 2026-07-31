@@ -130,6 +130,47 @@ class ResizeTests(unittest.TestCase):
         overlay.close()
 
 
+class HoverControlsTests(unittest.TestCase):
+    """Idle overlay is just text; controls appear on hover only."""
+
+    def test_buttons_hidden_until_hover(self):
+        overlay = SubtitleOverlay(width=800, height=200)
+        overlay.show()
+        self.assertFalse(overlay._min_button.isVisible())
+        self.assertFalse(overlay._close_button.isVisible())
+
+        overlay._set_hover(True)
+        self.assertTrue(overlay._min_button.isVisible())
+        self.assertTrue(overlay._close_button.isVisible())
+
+        overlay._set_hover(False)
+        self.assertFalse(overlay._min_button.isVisible())
+        self.assertFalse(overlay._close_button.isVisible())
+        overlay.close()
+
+    def test_language_pair_badge_flashes_on_change(self):
+        overlay = SubtitleOverlay(width=800, height=200)
+        overlay.show()
+        overlay.set_language_pair("ja", "ko")
+        self.assertTrue(overlay._lang_label.isVisible())
+        self.assertEqual(overlay._lang_label.text(), "Japanese \u2192 Korean")
+
+        overlay.set_language_pair("", "ko")
+        self.assertFalse(overlay._lang_label.isVisible())
+        overlay.close()
+
+    def test_badge_shows_while_hovering(self):
+        overlay = SubtitleOverlay(width=800, height=200)
+        overlay.show()
+        overlay.set_language_pair("es", "en")
+        overlay._on_badge_timeout()  # simulate flash expiring (not hovering)
+        self.assertFalse(overlay._lang_label.isVisible())
+
+        overlay._set_hover(True)
+        self.assertTrue(overlay._lang_label.isVisible())
+        overlay.close()
+
+
 class ThemeTests(unittest.TestCase):
     def test_set_theme_updates_colors_live(self):
         overlay = SubtitleOverlay(width=800, height=200)

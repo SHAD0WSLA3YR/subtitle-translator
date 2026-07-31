@@ -37,8 +37,10 @@ class PipelineController(QObject):
 
     state_changed = pyqtSignal(PipelineState)
     error_occurred = pyqtSignal(str)
-    translation_output = pyqtSignal(str, str, str)  # heard_text, translated_text, detected_lang
+    translation_output = pyqtSignal(str, str, str, object)  # heard, translated, lang, event
     translation_refined = pyqtSignal(str)  # refined_text (async update)
+    status_message = pyqtSignal(str)  # one-off status lines (model downloads etc.)
+    partial_output = pyqtSignal(str)  # provisional live-subtitle text
 
     def __init__(self, capture, vad, processor, overlay, refiner=None, parent=None):
         super().__init__(parent)
@@ -58,7 +60,11 @@ class PipelineController(QObject):
         """Start the full pipeline (STOPPED → RUNNING)."""
         if self._state == PipelineState.RUNNING:
             return
-        self._processor.start(on_translation=self._on_translation)
+        self._processor.start(
+            on_translation=self._on_translation,
+            on_status=self.status_message.emit,
+            on_partial=self.partial_output.emit,
+        )
         self._capture.start(on_audio=self._vad.process_chunk)
         self._state = PipelineState.RUNNING
         self.state_changed.emit(self._state)
@@ -103,14 +109,14 @@ class PipelineController(QObject):
         self.state_changed.emit(self._state)
         logger.info("Pipeline stopped")
 
-    def _on_translation(self, heard: str, translated: str, detected_lang: str = ""):
+    def _on_translation(self, heard: str, translated: str, detected_lang: str = "", utterance_event=None):
         """Called from the processor (non-Qt) thread.
 
         Emits Whisper output immediately so the overlay stays responsive, then
         optionally polishes the English line via LLM on a separate worker.
         """
         display = translated or heard
-        self.translation_output.emit(heard or "", display, detected_lang)
+        self.translation_output.emit(heard or "", display, detected_lang, utterance_event)
         if self._refiner and self._refiner.enabled and translated:
             threading.Thread(
                 target=self._refine_async,

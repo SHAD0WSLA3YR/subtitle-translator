@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
 )
 
 from src.stt.whisper_stt import PLAYBACK_SPEED_PRESETS, clamp_playback_speed
-from src.ui.overlay import BG_COLORS, DEFAULTS, FONT_COLORS
+from src.ui.overlay import BG_COLORS, DEFAULTS, FONT_COLORS, MIN_HEIGHT, MIN_WIDTH
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,7 @@ class SettingsDialog(QDialog):
         lang_layout.addRow("", self.lang_warning)
         self.source_combo.currentTextChanged.connect(self._validate_language)
         self.target_combo.currentTextChanged.connect(self._validate_language)
+        self._validate_language()
         layout.addWidget(lang_group)
 
         # --- Playback speed ---
@@ -143,9 +144,9 @@ class SettingsDialog(QDialog):
         pos_layout.addRow("X:", self.x_spin)
         self.y_spin = self._spin(0, 9999, overlay_cfg.get("y") or stock_y)
         pos_layout.addRow("Y:", self.y_spin)
-        self.width_spin = self._spin(320, 9999, overlay_cfg.get("width") or stock_w)
+        self.width_spin = self._spin(MIN_WIDTH, 9999, overlay_cfg.get("width") or stock_w)
         pos_layout.addRow("Width:", self.width_spin)
-        self.height_spin = self._spin(90, 999, stock_h)
+        self.height_spin = self._spin(MIN_HEIGHT, 999, stock_h)
         pos_layout.addRow("Height:", self.height_spin)
 
         geo_hint = QLabel("Tip: drag the box to move, drag its corner to resize.")
@@ -211,8 +212,11 @@ class SettingsDialog(QDialog):
         self.model_combo.setToolTip("Smaller = faster and lighter on your GPU/CPU.")
         perf_layout.addRow("Whisper model:", self.model_combo)
 
-        self.beam_spin = self._spin(1, 5, int(model_cfg.get("beam_size", 3)))
-        self.beam_spin.setToolTip("1–2 is fastest. 5 is most accurate.")
+        self.beam_spin = self._spin(1, 5, int(model_cfg.get("beam_size", 1)))
+        self.beam_spin.setToolTip(
+            "Keep at 1 for near-real-time. On laptop GPUs, beam 2+ can make "
+            "subtitles lag several sentences behind."
+        )
         perf_layout.addRow("Beam size:", self.beam_spin)
 
         self.threads_spin = self._spin(1, 16, int(model_cfg.get("cpu_threads", 4)))
@@ -279,13 +283,22 @@ class SettingsDialog(QDialog):
     def _validate_language(self):
         src = self.source_combo.currentText()
         tgt = self.target_combo.currentText()
-        if src == "Auto (Detect)":
-            self.lang_warning.setText("Language will be detected automatically from speech")
-            self.lang_warning.setStyleSheet("color: gray; font-size: 11px;")
-            self.lang_warning.show()
-        elif src == tgt:
+        if src == tgt:
             self.lang_warning.setText("Source and target should differ!")
             self.lang_warning.setStyleSheet("color: orange; font-size: 11px;")
+            self.lang_warning.show()
+            return
+        notes = []
+        if src == "Auto (Detect)":
+            notes.append("Source language is detected automatically from speech")
+        if tgt != "English":
+            notes.append(
+                "Non-English targets download an offline translation model "
+                "(~100 MB) on first use"
+            )
+        if notes:
+            self.lang_warning.setText("\n".join(notes))
+            self.lang_warning.setStyleSheet("color: gray; font-size: 11px;")
             self.lang_warning.show()
         else:
             self.lang_warning.hide()
@@ -353,3 +366,5 @@ class SettingsDialog(QDialog):
 
         self.settings_applied.emit()
         return self.config
+
+

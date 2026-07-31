@@ -154,17 +154,20 @@ class TrayIcon(QSystemTrayIcon):
                 self._pause_action.setText("\u23f8 Pause")
             self.setToolTip(self._tooltip_text())
 
-    def set_detected_language(self, lang_code: str) -> None:
-        if not lang_code:
+    _LANG_NAMES = {
+        "ja": "Japanese", "zh": "Chinese", "ko": "Korean",
+        "es": "Spanish", "fr": "French", "de": "German",
+        "pt": "Portuguese", "ru": "Russian", "it": "Italian",
+        "en": "English",
+    }
+
+    def set_language_pair(self, src_code: str, tgt_code: str = "en") -> None:
+        if not src_code:
             self._lang_action.setText("Language: --")
             return
-        display_name = {
-            "ja": "Japanese", "zh": "Chinese", "ko": "Korean",
-            "es": "Spanish", "fr": "French", "de": "German",
-            "pt": "Portuguese", "ru": "Russian", "it": "Italian",
-            "en": "English",
-        }.get(lang_code, lang_code.upper())
-        self._lang_action.setText(f"Language: {display_name}")
+        src = self._LANG_NAMES.get(src_code, src_code.upper())
+        tgt = self._LANG_NAMES.get(tgt_code, (tgt_code or "en").upper())
+        self._lang_action.setText(f"Language: {src} \u2192 {tgt}")
 
     def set_overlay_visible(self, visible: bool):
         """Keep the tray menu label in sync with overlay visibility."""

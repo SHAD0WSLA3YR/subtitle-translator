@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-07-29)
 
 ## Current Position
 
-Phase: 2 of 4 (Language Auto-Detection + Translation)
-Plan: 0 of 2 in current phase
-Status: Ready to plan
-Last activity: 2026-07-29 — v1.0.0 complete on master, initializing v2 planning
+Phase: 3 of 4 (Any-to-Any Translation) — complete, pending user verification
+Plan: 2 of 2 in current phase
+Status: Phases 2 + 3 implemented on feat/auto-detect-translate
+Last activity: 2026-07-29 — any-to-any NMT (Argos), language pair UI, history fix, overlay UX cleanup
 
-Progress: ░░░░░░░░░░ 0%
+Progress: ███████░░░ 70%
 
 ## Accumulated Context
 
@@ -29,6 +29,10 @@ Progress: ░░░░░░░░░░ 0%
 - 9 major languages supported: Japanese, Chinese, Korean, Spanish, French, German, Portuguese, Russian, Italian
 - Language-specific prompts improve accuracy for transcribe mode
 - Detected language propagated through pipeline signals as additional parameter
+- Phase 3 NMT backend: Argos Translate (offline, CTranslate2, auto-pivots through English)
+- Non-English targets: 1 Whisper transcribe pass + NMT text translation (same Whisper cost as fast path)
+- English target keeps Whisper's direct translate task (no NMT involved)
+- Overlay controls are hover-only; language pair badge flashes on change
 
 ### Pending Todos
 

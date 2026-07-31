@@ -12,9 +12,12 @@ than 1.0x (loopback audio is sped up; we stretch it back before Whisper).
 """
 
 import logging
+import threading
 from typing import Optional, Tuple
 
 import numpy as np
+
+from src.stt.local_agreement import join_words, words_from_segments
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +130,12 @@ class WhisperSTT:
         self._prev_ja = ""
         self._prev_en = ""
         self._detected_language: str = ""
+        self._language_probability: float = 0.0
+        # Sticky language for auto mode — set by the processor once detection
+        # is confident, so short clauses don't flip en↔ja and trash quality.
+        self._locked_language: str = ""
+        # Serialize inference: streaming ASR + async final-pass share one model.
+        self._infer_lock = threading.RLock()
 
     def set_playback_speed(self, speed: float) -> float:
         """Update playback speed at runtime (clamped to 0.75–1.5)."""
@@ -193,19 +202,24 @@ class WhisperSTT:
         task: str,
         initial_prompt: Optional[str] = None,
         language: Optional[str] = None,
-    ) -> Tuple[str, str]:
+    ) -> Tuple[str, str, float]:
         """Run a single Whisper pass. task is 'transcribe' or 'translate'.
 
         When language is None and self.language is "auto", passes language=None
-        to the model which triggers auto-detection. The detected language code
-        is returned as the second element.
+        to the model which triggers auto-detection — unless a locked language
+        is set via ``locked_language``.
         Returns:
-            Tuple of (transcribed_text, detected_language_code)
+            Tuple of (text, detected_language_code, language_probability)
         """
         assert self._model is not None
-        resolved_lang = language if language is not None else (
-            None if self.language == "auto" else self.language
-        )
+        if language is not None:
+            resolved_lang = language
+        elif self._locked_language:
+            resolved_lang = self._locked_language
+        elif self.language == "auto":
+            resolved_lang = None
+        else:
+            resolved_lang = self.language
         kwargs = dict(
             language=resolved_lang,
             task=task,
@@ -216,13 +230,92 @@ class WhisperSTT:
             no_speech_threshold=0.6,
             log_prob_threshold=-1.0,
             compression_ratio_threshold=2.4,
+            without_timestamps=True,
         )
         if initial_prompt:
             kwargs["initial_prompt"] = initial_prompt
         segments, _info = self._model.transcribe(audio, **kwargs)
         text = " ".join(seg.text for seg in segments).strip()
-        detected = _info.language if hasattr(_info, "language") else (language or self.language or "??")
-        return text, detected
+        detected = (
+            _info.language if hasattr(_info, "language") and _info.language
+            else (resolved_lang or self.language or "??")
+        )
+        prob = float(getattr(_info, "language_probability", 0.0) or 0.0)
+        if resolved_lang and not hasattr(_info, "language"):
+            prob = 1.0
+        return text, detected, prob
+
+    def transcribe_words(
+        self,
+        audio: np.ndarray,
+        lang_hint: str = "",
+        beam_size: Optional[int] = None,
+        initial_prompt: Optional[str] = None,
+    ):
+        """Transcribe with word_timestamps for LocalAgreement streaming.
+
+        Returns:
+            (words, full_text, detected_lang, probability)
+        """
+        with self._infer_lock:
+            return self._transcribe_words_locked(
+                audio, lang_hint=lang_hint, beam_size=beam_size, initial_prompt=initial_prompt
+            )
+
+    def _transcribe_words_locked(
+        self,
+        audio: np.ndarray,
+        lang_hint: str = "",
+        beam_size: Optional[int] = None,
+        initial_prompt: Optional[str] = None,
+    ):
+        if len(audio) == 0:
+            return [], "", self._detected_language or self.language, 0.0
+        self.load()
+        assert self._model is not None
+        lang = lang_hint or self._locked_language or (
+            None if self.language == "auto" else self.language
+        )
+        original_beam = self.beam_size
+        if beam_size is not None:
+            self.beam_size = beam_size
+        try:
+            audio = stretch_audio(audio, self.playback_speed)
+            kwargs = dict(
+                language=lang,
+                task="transcribe",
+                beam_size=self.beam_size,
+                vad_filter=False,
+                condition_on_previous_text=True,
+                temperature=0.0,
+                word_timestamps=True,
+                without_timestamps=False,
+                no_speech_threshold=0.6,
+                log_prob_threshold=-1.0,
+                compression_ratio_threshold=2.4,
+            )
+            if initial_prompt:
+                kwargs["initial_prompt"] = initial_prompt
+            segments, _info = self._model.transcribe(audio, **kwargs)
+            # Materialize generator before reading info-dependent fields.
+            seg_list = list(segments)
+            words = words_from_segments(seg_list)
+            text = join_words(words) or " ".join(
+                (getattr(s, "text", "") or "").strip() for s in seg_list
+            ).strip()
+            detected = (
+                _info.language if hasattr(_info, "language") and _info.language
+                else (lang or self.language or "??")
+            )
+            prob = float(getattr(_info, "language_probability", 0.0) or 0.0)
+            self._detected_language = detected
+            self._language_probability = prob
+            return words, text, detected, prob
+        except Exception as exc:
+            logger.error("Word-timestamp transcription error: %s", exc)
+            return [], "", self._detected_language or self.language, 0.0
+        finally:
+            self.beam_size = original_beam
 
     def transcribe_source(self, audio: np.ndarray, lang_hint: str = "") -> str:
         """Single pass: what was heard, in the source language.
@@ -232,24 +325,35 @@ class WhisperSTT:
             lang_hint: Language code hint for prompt selection (e.g. from
                        previous detection). Falls back to self.language.
         """
-        if len(audio) == 0:
-            return ""
-        self.load()
-        lang_key = lang_hint or self.language
-        base_prompt = _LANGUAGE_PROMPTS.get(lang_key, "")
-        prompt = base_prompt
-        if self._prev_ja:
-            prompt = f"{base_prompt} {self._prev_ja}"[-800:] if base_prompt else self._prev_ja[-800:]
-        try:
-            audio = stretch_audio(audio, self.playback_speed)
-            result, detected = self._run(audio, task="transcribe", initial_prompt=prompt, language=lang_hint or None)
-            self._detected_language = detected
-            return result
-        except Exception as exc:
-            logger.error("Transcription error: %s", exc)
-            return ""
+        with self._infer_lock:
+            if len(audio) == 0:
+                return ""
+            self.load()
+            lang_key = lang_hint or self.language
+            base_prompt = _LANGUAGE_PROMPTS.get(lang_key, "")
+            prompt = base_prompt
+            if self._prev_ja:
+                prompt = f"{base_prompt} {self._prev_ja}"[-800:] if base_prompt else self._prev_ja[-800:]
+            try:
+                audio = stretch_audio(audio, self.playback_speed)
+                # Prefer an explicit hint, then the sticky lock, else auto-detect.
+                lang = lang_hint or self._locked_language or None
+                result, detected, prob = self._run(
+                    audio, task="transcribe", initial_prompt=prompt, language=lang
+                )
+                self._detected_language = detected
+                self._language_probability = prob
+                return result
+            except Exception as exc:
+                logger.error("Transcription error: %s", exc)
+                return ""
 
-    def translate_to_english(self, audio: np.ndarray, heard: str = "") -> Tuple[str, str]:
+    def translate_to_english(
+        self,
+        audio: np.ndarray,
+        heard: str = "",
+        beam_size: Optional[int] = None,
+    ) -> Tuple[str, str]:
         """Single pass: English subtitle text.
 
         `heard` (if available) is fed in as vocabulary bias alongside the
@@ -258,31 +362,65 @@ class WhisperSTT:
         Returns:
             Tuple of (translated_text, detected_language_code)
         """
-        if len(audio) == 0:
-            return "", self._detected_language or self.language
-        self.load()
-        parts = []
-        if self._prev_en:
-            parts.append(self._prev_en)
-        if heard:
-            lang_label = self._detected_language.upper() if self._detected_language else "SOURCE"
-            parts.append(f"({lang_label}: {heard})")
-        prompt = " ".join(parts)[-800:] or None
-        try:
-            audio = stretch_audio(audio, self.playback_speed)
-            result, detected = self._run(audio, task="translate", initial_prompt=prompt)
-            self._detected_language = detected
-            if prompt and self._detected_language == "ja" and is_untranslated(result):
-                # Whisper sometimes echoes the source instead of translating.
-                # The prompt is the usual trigger, so retry without context.
-                retry, _ = self._run(audio, task="translate", initial_prompt=None)
-                if retry and not is_untranslated(retry):
-                    logger.debug("Recovered untranslated line by dropping prompt")
-                    return retry, detected
-            return result, detected
-        except Exception as exc:
-            logger.error("Translation error: %s", exc)
-            return "", self._detected_language or self.language
+        with self._infer_lock:
+            if len(audio) == 0:
+                return "", self._detected_language or self.language
+            self.load()
+            original_beam = self.beam_size
+            if beam_size is not None:
+                self.beam_size = max(1, int(beam_size))
+            parts = []
+            if self._prev_en:
+                parts.append(self._prev_en)
+            if heard:
+                lang_label = self._detected_language.upper() if self._detected_language else "SOURCE"
+                parts.append(f"({lang_label}: {heard})")
+            prompt = " ".join(parts)[-800:] or None
+            try:
+                audio = stretch_audio(audio, self.playback_speed)
+                lang = self._locked_language or None
+                result, detected, prob = self._run(
+                    audio, task="translate", initial_prompt=prompt, language=lang
+                )
+                self._detected_language = detected
+                self._language_probability = prob
+                if prompt and detected == "ja" and is_untranslated(result):
+                    # Whisper sometimes echoes the source instead of translating.
+                    # The prompt is the usual trigger, so retry without context.
+                    retry, retry_lang, _ = self._run(
+                        audio, task="translate", initial_prompt=None, language=lang
+                    )
+                    if retry and not is_untranslated(retry):
+                        logger.debug("Recovered untranslated line by dropping prompt")
+                        return retry, retry_lang or detected
+                return result, detected
+            except Exception as exc:
+                logger.error("Translation error: %s", exc)
+                return "", self._detected_language or self.language
+            finally:
+                self.beam_size = original_beam
+
+    def lock_language(self, code: str) -> None:
+        """Pin auto-detect to a language so short clauses stay consistent."""
+        code = (code or "").lower()
+        if code in ("", "auto", "??"):
+            return
+        if code != self._locked_language:
+            logger.info("Source language locked to %s", code)
+        self._locked_language = code
+
+    def unlock_language(self) -> None:
+        if self._locked_language:
+            logger.info("Source language unlocked (was %s)", self._locked_language)
+        self._locked_language = ""
+
+    @property
+    def locked_language(self) -> str:
+        return self._locked_language
+
+    @property
+    def language_probability(self) -> float:
+        return getattr(self, "_language_probability", 0.0)
 
     def commit_context(self, heard: str, translated: str) -> None:
         """Remember an emitted line so the next clause gets it as context."""

@@ -1,4 +1,4 @@
-"""Real-Time Japanese to English Subtitle Translator - Application Controller.
+"""Real-Time Subtitle Translator - Application Controller.
 
 Wires together all modules: audio capture, VAD, STT, LLM refinement,
 the PyQt5 overlay, system tray icon, settings dialog, and session
@@ -33,6 +33,9 @@ from src.ui.history_dialog import HistoryDialog
 from src.core.history import HistoryManager
 from src.core.pipeline import PipelineController, PipelineState
 from src.core.comparison import ComparisonLogger, default_comparison_path
+from src.core.capability import apply_profile_to_config, detect_capability
+from src.translate.contextual import ContextualTranslator
+from src.stt.events import UtteranceStatus
 from src.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -85,6 +88,10 @@ class SubtitleApp:
         llm_cfg = config.get("llm", {})
         overlay_cfg = config.get("overlay", {})
         compare_cfg = config.get("compare", {})
+        latency_cfg = config.get("latency", {})
+        self._live_partials = bool(latency_cfg.get("live_partials", True))
+        self._streaming = bool(latency_cfg.get("streaming", True))
+        self._profile_reason = (latency_cfg.get("profile") or {}).get("reason", "")
 
         # --- PyQt5 Application ---
         self.app = QApplication(sys.argv)
@@ -137,26 +144,45 @@ class SubtitleApp:
         # --- STT Processor (queue + Whisper) ---
         audio_speed = clamp_playback_speed(audio_cfg.get("playback_speed", 1.0))
         self.processor = TranslationProcessor(
-            model_size=model_cfg.get("size", "small"),
+            model_size=model_cfg.get("size", "base"),
             device=model_cfg.get("device", "cuda"),
             compute_type=model_cfg.get("compute_type", "int8_float16"),
-            language=model_cfg.get("language", "ja"),
-            beam_size=model_cfg.get("beam_size", 3),
+            language=model_cfg.get("language", "auto"),
+            beam_size=model_cfg.get("beam_size", 1),
             playback_speed=audio_speed,
             cpu_threads=model_cfg.get("cpu_threads", 4),
             dual_pass=self._compare_path is not None,
+            target_language=model_cfg.get("target_language", "en"),
+            max_queued=int(latency_cfg.get("max_queued", 1)),
+            lag_governor=bool(latency_cfg.get("lag_governor", True)),
+            streaming=self._streaming,
+            final_beam=int(latency_cfg.get("final_beam", 3)),
+            min_final_seconds=float(latency_cfg.get("min_final_seconds", 1.2)),
+            streaming_flush_chars=int(latency_cfg.get("streaming_flush_chars", 80)),
+            streaming_flush_timeout_s=float(latency_cfg.get("streaming_flush_timeout_s", 6.0)),
+            translator=self._build_translator(latency_cfg, model_cfg),
+            max_subtitle_age_s=float(latency_cfg.get("max_subtitle_age_s", 6.0)),
         )
 
         # --- VAD ---
+        # Live partials fire while speech is still going so the overlay can
+        # show a provisional line ~1.5s into a sentence instead of waiting
+        # for the silence that ends the clause.
+        partial_ms = int(latency_cfg.get("partial_interval_ms", 1400))
         self.vad = VADProcessor(
             sample_rate=16000,
             threshold=vad_cfg.get("threshold", 0.3),
-            min_speech_duration_ms=vad_cfg.get("min_speech_duration_ms", 500),
-            min_silence_duration_ms=vad_cfg.get("min_silence_duration_ms", 800),
-            speech_pad_ms=vad_cfg.get("speech_pad_ms", 300),
-            max_speech_duration_ms=vad_cfg.get("max_speech_duration_ms", 8000),
+            min_speech_duration_ms=vad_cfg.get("min_speech_duration_ms", 550),
+            min_silence_duration_ms=vad_cfg.get("min_silence_duration_ms", 400),
+            speech_pad_ms=vad_cfg.get("speech_pad_ms", 250),
+            max_speech_duration_ms=vad_cfg.get("max_speech_duration_ms", 6000),
             silence_floor=vad_cfg.get("silence_floor", 0.004),
+            merge_silence_ms=vad_cfg.get("merge_silence_ms", 400),
+            target_min_speech_ms=vad_cfg.get("target_min_speech_ms", 3000),
             on_clause=self._on_clause,
+            on_partial=self._on_partial if (self._live_partials or self._streaming) else None,
+            partial_interval_ms=partial_ms,
+            min_partial_ms=max(1100, partial_ms - 200),
         )
 
         # --- Audio Capture ---
@@ -180,6 +206,8 @@ class SubtitleApp:
         self.pipeline.state_changed.connect(self._on_pipeline_state)
         self.pipeline.translation_output.connect(self._on_translation_ui)
         self.pipeline.translation_refined.connect(self._on_translation_refined)
+        self.pipeline.status_message.connect(self._on_status_message)
+        self.pipeline.partial_output.connect(self._on_partial_ui)
 
         # --- System Tray ---
         self.tray = TrayIcon(parent=self.overlay, playback_speed=audio_speed)
@@ -214,6 +242,24 @@ class SubtitleApp:
             )
 
     @staticmethod
+    def _build_translator(latency_cfg: dict, model_cfg: dict) -> ContextualTranslator:
+        """Local CPU → NVIDIA (budgeted) → Argos → passthrough."""
+        tr_cfg = latency_cfg.get("translator") or {}
+        return ContextualTranslator(
+            api_key_env=tr_cfg.get("api_key_env", "NVIDIA_API_KEY"),
+            model=tr_cfg.get(
+                "model", "nvidia/riva-translate-4b-instruct-v2"
+            ),
+            rpm_limit=int(tr_cfg.get("rpm_limit", 40)),
+            weekly_limit=int(tr_cfg.get("weekly_limit", 1000)),
+            temperature=float(tr_cfg.get("temperature", 0.0)),
+            max_tokens=int(tr_cfg.get("max_tokens", 160)),
+            local_provider=str(tr_cfg.get("local_provider", "auto")),
+            use_nvidia=bool(tr_cfg.get("use_nvidia", False)),
+            context_pairs=int(tr_cfg.get("context_pairs", 0)),
+        )
+
+    @staticmethod
     def _resolve_compare_path(
         compare_cfg: dict, cli_path: Optional[str]
     ) -> Optional[Path]:
@@ -231,6 +277,17 @@ class SubtitleApp:
         """Called by VAD when a complete clause is detected."""
         self._clause_start_time = datetime.datetime.now()
         self.processor.add_clause(audio)
+
+    def _on_partial(self, audio):
+        """Called by VAD with a snapshot of speech still in progress."""
+        self.processor.add_partial(audio)
+
+    def _on_partial_ui(self, text: str):
+        """Provisional live subtitle — source draft (streaming) or EN (legacy)."""
+        if self._streaming:
+            self.overlay.show_source_draft(text or "")
+        elif text:
+            self.overlay.show_provisional(text)
 
     def _on_overlay_moved(self, x: int, y: int):
         """Persist drag position into in-memory config (saved via Settings)."""
@@ -260,20 +317,41 @@ class SubtitleApp:
         else:
             self.overlay.hide_by_user()
 
-    def _on_translation_ui(self, heard_text: str, translated_text: str, detected_lang: str = ""):
+    def _on_status_message(self, message: str):
+        """One-off pipeline status (e.g. translation model download)."""
+        self.overlay.show_subtitle(message)
+
+    def _on_translation_ui(
+        self,
+        heard_text: str,
+        translated_text: str,
+        detected_lang: str = "",
+        utterance_event=None,
+    ):
         """Called on Qt main thread via pipeline signal (thread-safe for overlay)."""
         self._current_detected_lang = detected_lang
-        display = translated_text or heard_text
-        self.overlay.show_subtitle(display)
-        if detected_lang:
-            if hasattr(self.overlay, "set_detected_language"):
-                self.overlay.set_detected_language(detected_lang)
-            self.tray.set_detected_language(detected_lang)
 
+        # Always persist history even when overlay is skipped as stale.
         try:
             self.history.log_subtitle(heard_text, translated_text, detected_lang=detected_lang)
         except Exception as e:
             logger.debug("History log failed: %s", e)
+
+        if utterance_event is not None and getattr(
+            utterance_event, "status", None
+        ) == UtteranceStatus.DROPPED_STALE:
+            # Already logged DROPPED_STALE in TranslateWorker — skip render.
+            return
+
+        display = translated_text or heard_text
+        self.overlay.show_subtitle(display)
+        if utterance_event is not None:
+            utterance_event.status = UtteranceStatus.OVERLAY_COMMIT
+            logger.info(utterance_event.log_overlay_commit())
+        if detected_lang:
+            target = self.processor.target_language
+            self.overlay.set_language_pair(detected_lang, target)
+            self.tray.set_language_pair(detected_lang, target)
 
         if self._compare is not None:
             try:
@@ -354,9 +432,16 @@ class SubtitleApp:
 
     def _on_show_history(self):
         """Open the history dialog."""
-        dlg = HistoryDialog(self.history, parent=self.overlay)
-        dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        dlg.exec_()
+        try:
+            dlg = HistoryDialog(self.history, parent=self.overlay)
+            dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+            dlg.exec_()
+        except Exception as e:
+            logger.exception("History dialog failed")
+            QMessageBox.warning(
+                self.overlay, "Translation History",
+                f"Could not open history:\n{e}",
+            )
 
     def _on_playback_speed_changed(self, speed: float):
         """Tray menu changed playback speed — apply live and persist."""
@@ -417,6 +502,10 @@ class SubtitleApp:
         self.processor.stt.beam_size = int(
             self.config.get("model", {}).get("beam_size", 3)
         )
+
+        model_cfg = self.config.get("model", {})
+        self.processor.stt.language = model_cfg.get("language", "auto")
+        self.processor.set_target_language(model_cfg.get("target_language", "en"))
         logger.info("Settings applied (restart required for Whisper model / LLM changes)")
 
     # --- Lifecycle ---
@@ -433,16 +522,40 @@ class SubtitleApp:
         srt_enabled = self.srt_path is not None
 
         print("=" * 55)
-        print("  Real-Time Japanese to English Subtitle Translator")
+        print("  Real-Time Subtitle Translator")
         print("=" * 55)
-        print(f"  Model:     {model_cfg.get('size', 'small')} (beam {model_cfg.get('beam_size', 3)})")
+        print(f"  Model:     {model_cfg.get('size', 'small')} (draft beam {model_cfg.get('beam_size', 1)})")
         print(f"  Device:    {model_cfg.get('device', 'cuda')}")
         lang_display = model_cfg.get("language", "auto")
         if lang_display == "auto":
             lang_display = "Auto-detect"
-        print(f"  Language:  {lang_display}")
+        print(f"  ASR:       {lang_display} transcribe (Whisper translate OFF)")
+        print(f"  Target:    {model_cfg.get('target_language', 'en')}")
         print(f"  Speed:     {audio_cfg.get('playback_speed', 1.0)}x (set to match player)")
-        print(f"  Passes:    {'2 (translate + source)' if self._compare_path else '1 (translate only)'}")
+        if self._streaming:
+            passes = "JA transcribe + local/Argos MT"
+        elif model_cfg.get("target_language", "en") != "en":
+            passes = "1 (transcribe + offline NMT)"
+        elif self._compare_path:
+            passes = "2 (translate + source) [legacy]"
+        else:
+            passes = "1 (Whisper translate) [legacy — set latency.streaming: true]"
+        print(f"  Passes:    {passes}")
+        if self._streaming:
+            live = "LocalAgreement JA draft + async EN"
+        elif self._live_partials:
+            live = "partials + lag governor"
+        else:
+            live = "final clauses only"
+        print(f"  Live:      {live}")
+        fb = int(self.config.get("latency", {}).get("final_beam", 3))
+        if self._streaming:
+            print(f"  Final ASR: beam {fb} JA re-transcribe")
+            tr = getattr(self.processor, "_translator", None)
+            if tr is not None:
+                print(f"  MT:        {tr.mt_chain_status()} ({tr.budget_status()})")
+        if self._profile_reason:
+            print(f"  Profile:   {self._profile_reason}")
         print(f"  LLM:       {'enabled' if llm_enabled else 'disabled'}")
         print(f"  Version:   v{__version__}")
         if self.srt_path:
@@ -458,7 +571,7 @@ class SubtitleApp:
 
         # Start session history
         self.history.start_session(
-            source=model_cfg.get("language", "ja"),
+            source=model_cfg.get("language", "auto"),
             target=model_cfg.get("target_language", "en"),
         )
 
@@ -510,7 +623,7 @@ class SubtitleApp:
 def parse_args(argv=None):
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Real-Time Japanese to English Subtitle Translator",
+        description="Real-Time Subtitle Translator",
     )
     parser.add_argument(
         "-c", "--config",
@@ -542,6 +655,12 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     setup_logging(args.verbose)
     config = load_config(args.config)
+
+    # Probe GPU/CPU and align latency-critical knobs before anything loads.
+    prefer = (config.get("model") or {}).get("device", "cuda")
+    profile = detect_capability(prefer_device=prefer)
+    apply_profile_to_config(config, profile)
+    logger.info("Capability: %s", profile.reason)
 
     compare_path = None
     if args.compare == "auto":

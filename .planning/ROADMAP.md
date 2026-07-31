@@ -1,5 +1,25 @@
 # Roadmap: Subtitle Translator
 
+## 🔒 Branch Strategy (READ FIRST — critical, do not deviate)
+
+| Branch | Purpose | Status |
+|--------|---------|--------|
+| `master` | **v1 release — FROZEN. NEVER TOUCH.** | 🔒 Frozen forever |
+| `development` | All v2 work lands here first. Everything new goes here. | 🚧 Active |
+| `translation-multilingual` | v2 release package. Created ONLY when `development` runs satisfactorily. | ⏳ Not yet created |
+
+### Rules
+
+1. **`master` is v1. Do not touch it. Ever.** No commits, no merges, no tag moves, no releases against it. v1 stays exactly as shipped.
+2. **All v2 work → `development` first.** Features, fixes, experiments, polish — everything starts here.
+3. **v2 release → `translation-multilingual` branch.** Only after `development` runs to satisfaction. This branch becomes the v2 release package — clean, minimal, user-ready.
+4. **Release hygiene:** the `translation-multilingual` release branch contains ONLY what a user needs to download and run the software:
+   - **Include:** `run.py`, `run.bat`, `config.yaml`, `requirements*.txt`, `src/`, `build/`, `scripts/`, `assets/`, `README.md`, `LICENSE`, `.github/workflows/release.yml` (for CI builds)
+   - **Exclude:** `.planning/`, `STATUS-v2.md`, `AGENTS.md`, `.tmp*`, `.bench_out/`, `.omx/`, tests, and any dev/agent artifacts
+5. **Never merge `development` → `master`.** v1 and v2 are separate worlds that share a repo.
+
+> If a machine or git mishap destroys work, the loss is recoverable ONLY from `development` — commit early, commit often.
+
 ## Overview
 
 From hardcoded Japanese→English real-time subtitle translator to a fully multilingual, near-real-time any-to-any translation overlay. v1 proven the architecture works; v2 adds language flexibility and speed.
@@ -43,8 +63,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: Core pipeline — WhisperSTT auto-detection, language-aware processing, signal chain (Wave 1)
-- [ ] 02-02: UI & Settings — auto-detect option, overlay badge, tray status, history logging (Wave 2)
+- [x] 02-01: Core pipeline — WhisperSTT auto-detection, language-aware processing, signal chain (Wave 1)
+- [x] 02-02: UI & Settings — auto-detect option, overlay badge, tray status, history logging (Wave 2)
 
 #### Phase 3: Any-to-Any Translation
 **Goal**: Translate between any supported language pair, not just to English
@@ -59,8 +79,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: Translation engine abstraction + offline NMT integration
-- [ ] 03-02: UI for any-to-any target selection + backend switching
+- [x] 03-01: Translation engine abstraction + offline NMT integration (Argos Translate)
+- [x] 03-02: UI for any-to-any target selection + language pair display
 
 #### Phase 4: Near-Real-Time Speed Optimization
 **Goal**: Achieve near-real-time conversion latency across all language pairs
@@ -85,6 +105,6 @@ Plans:
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. Foundation | v1.0 | 1/1 | Complete | 2026-07-29 |
-| 2. Auto-Detect + EN | v2.0 | 0/2 | **Planning** | - |
-| 3. Any-to-Any | v2.0 | 0/2 | Not started | - |
-| 4. Speed Optimization | v2.0 | 0/2 | Not started | - |
+| 2. Auto-Detect + EN | v2.0 | 2/2 | Complete | 2026-07-29 |
+| 3. Any-to-Any | v2.0 | 2/2 | Complete (pending user verification) | 2026-07-29 |
+| 4. Speed Optimization | v2.0 | 1/2 | In progress (live partials + lag governor + auto-tune) | 2026-07-29 |

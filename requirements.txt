@@ -7,3 +7,7 @@ onnxruntime>=1.16.0
 pyyaml>=6.0
 requests>=2.31.0
 torch>=2.0.0
+argostranslate>=1.11.0   # offline NMT for non-English target languages
+ctranslate2>=4.0.0       # local CPU NLLB
+transformers>=4.36.0     # NLLB tokenizer
+sentencepiece>=0.1.99    # NLLB SentencePiece

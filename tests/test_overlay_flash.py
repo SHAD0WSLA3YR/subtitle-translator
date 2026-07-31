@@ -75,11 +75,11 @@ class PipelineAsyncTests(unittest.TestCase):
         )
         received = []
         pipe.translation_output.connect(
-            lambda heard, translated: received.append((heard, translated))
+            lambda heard, translated, lang="", _ev=None: received.append((heard, translated))
         )
         pipe._state = PipelineState.RUNNING
 
-        pipe._on_translation("こんにちは", "Hello")
+        pipe._on_translation("こんにちは", "Hello", "ja", None)
         self.assertEqual(received, [("こんにちは", "Hello")])
 
 

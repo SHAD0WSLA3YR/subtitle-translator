@@ -28,3 +28,10 @@ Desktop.ini
 # Local secrets
 LLM_API_KEY
 *.key
+
+# Dev / agent artifacts — NOT part of a user-facing release
+.tmp*
+.bench_out/
+.omx/
+AGENTS.md
+graphify-out/
